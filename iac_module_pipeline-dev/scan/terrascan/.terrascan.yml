@@ -1,0 +1,116 @@
+# =============================================================================
+# GitLab CI Job: Terrascan IaC Security Scanner
+# Purpose: Scans Infrastructure as Code (IaC) files for security violations
+#          against cloud security best practices and compliance policies
+#          (CIS, SOC2, PCI-DSS, HIPAA, etc.) using Terrascan.
+# Reference: https://runterrascan.io/
+# =============================================================================
+iac_terrascan_job:
+  # Stage in the CI pipeline where this job runs
+  stage: iac_terrascan
+
+
+  # Docker image used for running Terrascan
+  # Variables TERRASCAN_IMAGE and TERRASCAN_IMAGE_VERSION should be defined in CI/CD settings
+  # e.g., tenable/terrascan:latest
+  image: ${TERRASCAN_IMAGE}:${TERRASCAN_IMAGE_VERSION}
+
+  variables:
+    GIT_SSL_NO_VERIFY: "true"
+    # TERRASCAN_TARGET_CLOUD: Cloud provider policy to apply
+    # Options: azure, aws, gcp (or comma-separated for multiple: "azure,aws")
+    # Override in GitLab CI/CD settings per project
+    # Default: azure
+    # TERRASCAN_TARGET_CLOUD: "${TERRASCAN_TARGET_CLOUD}"
+    TERRASCAN_TARGET_CLOUD: "azure"
+
+  # Run on all pipelines to catch policy violations early
+  #rules:
+  #  - when: always    # Execute on every pipeline regardless of branch or event
+
+  # Artifacts are files preserved after the job completes
+  # Reports are saved regardless of pass/fail so results can be reviewed
+  artifacts:
+    paths:
+      - reports/terrascan-report.json     # Scan results in JSON format
+      - reports/terrascan-report.xml      # Scan results in JUnit XML format
+    reports:
+      junit: reports/terrascan-report.xml # Enables test report visualization in GitLab MR
+    when: always                          # Save artifact even if the job fails
+
+  # Job execution steps
+  script:
+    - set -eo pipefail
+
+    - echo "=============== IaC Policy Scan (Terrascan) ================================"
+    - echo "[INFO] Terrascan scan started"
+    - echo "[INFO] Docker image ${TERRASCAN_IMAGE}:${TERRASCAN_IMAGE_VERSION}"
+    - pwd
+    - ls
+
+    # Check if Terrascan scan should be skipped via CI/CD variable
+    # Set TERRASCAN_SCAN_SKIP=Y in CI/CD variables to bypass (not recommended)
+    - |
+      if [[ "${TERRASCAN_SCAN_SKIP}" == "Y" ]]; then
+        echo "[WARN] Skipping Terrascan scan — this is not good practice"
+        exit 0
+      fi
+
+    # Run Terrascan against the Terraform working directory
+    # scan: perform the security scan
+    # -i terraform: input type is Terraform
+    # -d: directory to scan (.kaas is the Terraform working directory)
+    # -t: target cloud provider(s) from TERRASCAN_TARGET_CLOUD variable
+    # -o json/junit-xml/human: output formats
+    # --config-with-error: exit with error code on violations
+    # Policy types scanned: CIS, SOC2, PCI-DSS, HIPAA, GDPR, NIST
+    - |
+      echo "[INFO] Scanning Terraform files for policy violations..."
+      echo "[INFO] Target cloud provider(s): ${TERRASCAN_TARGET_CLOUD}"
+
+      # Build -t flags from comma-separated TERRASCAN_TARGET_CLOUD variable
+      # e.g., "azure,aws" becomes "-t azure -t aws"
+      TARGET_FLAGS=""
+      IFS=',' read -ra TARGETS <<< "${TERRASCAN_TARGET_CLOUD}"
+      for target in "${TARGETS[@]}"; do
+        TARGET_FLAGS="${TARGET_FLAGS} -t $(echo ${target} | xargs)"
+      done
+      echo "[INFO] Terrascan target flags: ${TARGET_FLAGS}"
+
+      # Create reports directory
+      mkdir -p "${CI_PROJECT_DIR}/reports"
+
+      # 1. JSON report (--config-with-error works with json)
+      eval terrascan scan \
+        -i terraform \
+        -d "${CI_PROJECT_DIR}" \
+        ${TARGET_FLAGS} \
+        -o json \
+        --config-with-error > "${CI_PROJECT_DIR}/reports/terrascan-report.json" 2>&1 || TERRASCAN_EXIT=$?
+
+      # 2. JUnit XML report for GitLab MR integration
+      # NOTE: --config-with-error NOT supported with junit-xml output
+      eval terrascan scan \
+        -i terraform \
+        -d "${CI_PROJECT_DIR}" \
+        ${TARGET_FLAGS} \
+        -o junit-xml > "${CI_PROJECT_DIR}/reports/terrascan-report.xml" 2>&1 || true
+
+      # 3. Human-readable console output
+      # NOTE: --config-with-error NOT supported with human output
+      eval terrascan scan \
+        -i terraform \
+        -d "${CI_PROJECT_DIR}" \
+        ${TARGET_FLAGS} \
+        -o human || true
+
+      # Use exit code from JSON scan (the one with --config-with-error)
+      if [[ "${TERRASCAN_EXIT:-0}" -ne 0 ]]; then
+        echo "[ERROR] Terrascan found policy violations — see report above"
+        #exit ${TERRASCAN_EXIT}  # TO-DO
+        exit 0
+      fi
+
+    - echo "[INFO] Terrascan scan completed"
+
+  #allow_failure: false

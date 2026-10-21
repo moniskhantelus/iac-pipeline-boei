@@ -1,0 +1,177 @@
+# =============================================================================
+# GitLab CI Job: Coverity Scan for Terraform / IaC
+# Purpose: Submits Terraform and IaC files to Coverity for static analysis.
+#          Coverity natively supports compiled languages, so for Terraform/HCL
+#          we use cov-build with the --fs-capture-search flag to capture file
+#          system artifacts and analyze them for misconfigurations and defects.
+# Reference: https://scan.coverity.com/
+# =============================================================================
+iac_coverity_job:
+  # Stage in the CI pipeline where this job runs
+  stage: iac_coverity
+
+
+  # Docker image with Coverity tools pre-installed
+  # COVERITY_IMAGE and COVERITY_IMAGE_VERSION should be defined in CI/CD settings
+  image: ${COVERITY_IMAGE}:${COVERITY_IMAGE_VERSION}
+
+  variables:
+    GIT_SSL_NO_VERIFY: "true"
+    # COVERITY_SERVER_URL: Coverity Connect server URL
+    # Set as CI/CD variable in GitLab project settings
+    COVERITY_SERVER_URL: ""
+    # COVERITY_AUTH_KEY_PATH: Path to Coverity auth key file
+    # Set as CI/CD file variable in GitLab project settings
+    COVERITY_AUTH_KEY_PATH: ""
+    # COVERITY_STREAM: Coverity stream name for this project
+    # Default: uses CI_PROJECT_NAME
+    COVERITY_STREAM: ""
+    # COVERITY_SCAN_DIR: Directory to scan
+    # Default: auto-detects .kaas or CI_PROJECT_DIR
+    COVERITY_SCAN_DIR: ""
+    # Folders to skip (comma-separated)
+    COVERITY_SKIP_DIRS: "examples,reports,architecture,test,tests,.git,.terraform"
+
+
+  artifacts:
+    paths:
+      - reports/coverity-report.json
+      - reports/coverity-results.html
+    when: always
+
+  script:
+    - echo "=============== Coverity Scan (IaC) ================================"
+    - echo "[INFO] Coverity scan started"
+    - echo "[INFO] Docker image ${COVERITY_IMAGE}:${COVERITY_IMAGE_VERSION}"
+    - pwd
+    - ls
+
+    # Check if Coverity scan should be skipped
+    - |
+      if [[ "${COVERITY_SCAN_SKIP}" == "Y" ]]; then
+        echo "[WARN] Skipping Coverity scan"
+        exit 0
+      fi
+
+    # Validate required variables
+    - |
+      if [[ -z "${COVERITY_SERVER_URL}" ]]; then
+        echo "[ERROR] COVERITY_SERVER_URL is not set — configure in CI/CD settings"
+        exit 1
+      fi
+
+    # Determine scan directory
+    # Priority: COVERITY_SCAN_DIR > .kaas > CI_PROJECT_DIR
+    - |
+      if [[ -n "${COVERITY_SCAN_DIR}" ]]; then
+        SCAN_PATH="${COVERITY_SCAN_DIR}"
+        echo "[INFO] Using custom scan directory: ${SCAN_PATH}"
+      elif [[ -d "${CI_PROJECT_DIR}/.kaas" ]]; then
+        SCAN_PATH="${CI_PROJECT_DIR}/.kaas"
+        echo "[INFO] Found .kaas directory: ${SCAN_PATH}"
+      else
+        SCAN_PATH="${CI_PROJECT_DIR}"
+        echo "[INFO] Using project root: ${SCAN_PATH}"
+      fi
+
+    # Determine stream name
+    - |
+      if [[ -z "${COVERITY_STREAM}" ]]; then
+        COVERITY_STREAM="${CI_PROJECT_NAME}-${CI_COMMIT_BRANCH%%_*}"
+        echo "[INFO] Auto-generated stream name: ${COVERITY_STREAM}"
+      else
+        echo "[INFO] Using configured stream: ${COVERITY_STREAM}"
+      fi
+
+    # Create intermediate and reports directories
+    - mkdir -p "${CI_PROJECT_DIR}/cov-idir"
+    - mkdir -p "${CI_PROJECT_DIR}/reports"
+
+    # Build skip directory arguments for cov-build
+    - |
+      SKIP_ARGS=""
+      IFS=',' read -ra DIRS <<< "${COVERITY_SKIP_DIRS}"
+      for dir in "${DIRS[@]}"; do
+        dir_trimmed=$(echo "${dir}" | xargs)
+        if [[ -d "${SCAN_PATH}/${dir_trimmed}" ]]; then
+          SKIP_ARGS="${SKIP_ARGS} --fs-capture-search-exclude-regex .*/${dir_trimmed}/.*"
+          echo "[INFO] Excluding directory: ${dir_trimmed}"
+        fi
+      done
+
+    # Step 1: Capture file system artifacts
+    # --fs-capture-search: tells Coverity to scan filesystem (for non-compiled langs)
+    # This captures .tf, .tfvars, .json, .yml files for analysis
+    - |
+      echo "[INFO] Running cov-build (filesystem capture mode)..."
+      eval cov-build \
+        --dir "${CI_PROJECT_DIR}/cov-idir" \
+        --no-command \
+        --fs-capture-search "${SCAN_PATH}" \
+        ${SKIP_ARGS} \
+        --fs-capture-search-include-regex '.*\.(tf|tfvars|json|yml|yaml)$'
+      echo "[INFO] cov-build capture completed"
+
+    # Step 2: Analyze captured files
+    - |
+      echo "[INFO] Running cov-analyze..."
+      cov-analyze \
+        --dir "${CI_PROJECT_DIR}/cov-idir" \
+        --strip-path "${CI_PROJECT_DIR}" \
+        --all
+      echo "[INFO] cov-analyze completed"
+
+    # Step 3: Generate local HTML report
+    - |
+      echo "[INFO] Generating local report..."
+      cov-format-errors \
+        --dir "${CI_PROJECT_DIR}/cov-idir" \
+        --html-output "${CI_PROJECT_DIR}/reports/coverity-results.html" || true
+
+    # Step 4: Export defects as JSON
+    - |
+      cov-format-errors \
+        --dir "${CI_PROJECT_DIR}/cov-idir" \
+        --json-output-v9 "${CI_PROJECT_DIR}/reports/coverity-report.json" || true
+
+    # Step 5: Commit results to Coverity Connect server
+    - |
+      if [[ -n "${COVERITY_AUTH_KEY_PATH}" && -f "${COVERITY_AUTH_KEY_PATH}" ]]; then
+        echo "[INFO] Committing results to Coverity Connect..."
+        cov-commit-defects \
+          --dir "${CI_PROJECT_DIR}/cov-idir" \
+          --url "${COVERITY_SERVER_URL}" \
+          --auth-key-file "${COVERITY_AUTH_KEY_PATH}" \
+          --stream "${COVERITY_STREAM}" \
+          --description "Pipeline ${CI_PIPELINE_ID} — Branch ${CI_COMMIT_BRANCH}"
+        echo "[INFO] Results committed to stream: ${COVERITY_STREAM}"
+      else
+        echo "[WARN] No auth key — skipping commit to Coverity Connect (local report only)"
+      fi
+
+    # Step 6: Summary
+    - |
+      echo ""
+      echo "=============== Coverity Summary ================================"
+      if [[ -f "${CI_PROJECT_DIR}/reports/coverity-report.json" ]] && command -v jq &>/dev/null; then
+        DEFECT_COUNT=$(jq '.issues | length' "${CI_PROJECT_DIR}/reports/coverity-report.json" 2>/dev/null || echo 0)
+        printf "%-20s | %-10s\n" "Metric" "Value"
+        printf "%-20s | %-10s\n" "--------------------" "----------"
+        printf "%-20s | %-10s\n" "Total Defects" "${DEFECT_COUNT}"
+        printf "%-20s | %-10s\n" "Stream" "${COVERITY_STREAM}"
+        printf "%-20s | %-10s\n" "Scan Directory" "${SCAN_PATH}"
+
+        if [[ "${DEFECT_COUNT}" -gt 0 ]]; then
+          echo ""
+          echo "[WARN] Coverity found ${DEFECT_COUNT} defect(s) — review in Coverity Connect or HTML report"
+        else
+          echo ""
+          echo "[INFO] No defects found"
+        fi
+      else
+        echo "[INFO] Report generated at reports/coverity-results.html"
+      fi
+      echo "====================================================================="
+      echo "[INFO] Coverity scan completed"
+
+  allow_failure: true
