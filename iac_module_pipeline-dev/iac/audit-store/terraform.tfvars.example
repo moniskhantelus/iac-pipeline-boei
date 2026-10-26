@@ -1,0 +1,14 @@
+# Example variables for the audit-store stack. Copy to terraform.tfvars and adjust as needed.
+# Contains NO secrets.
+
+location             = "usgovvirginia"
+resource_group_name  = "kaas-shared-audit-rg"
+storage_account_name = "strataaudit"
+container_name       = "audit-records"
+retention_days       = 730 # authoritative; provisioned UNLOCKED, locked manually post legal sign-off
+
+tags = {
+  environment = "shared-services"
+  purpose     = "worm-audit"
+  compliance  = "fedramp-high"
+}

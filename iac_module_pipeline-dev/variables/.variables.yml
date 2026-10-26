@@ -33,10 +33,20 @@ variables:
   #   AZ_<branch_prefix>_ST_ACCESS_KEY      (masked, protected)
   # These MUST be set in GitLab CI/CD settings per project — never hardcode here.
 
-  AZ_TYPE_ENVIRONMENT: "AzureCloud"          # AzureCloud | AzureUSGovernment | AzureChinaCloud
-  AZ_LOGIN_CSP_TYPE: "AzureCloud"            # az cloud set --name value
+  AZ_TYPE_ENVIRONMENT: "AzureUSGovernment"   # AzureCloud | AzureUSGovernment | AzureChinaCloud
+  AZ_LOGIN_CSP_TYPE: "AzureUSGovernment"     # az cloud set --name value (Gov: SP + backend are usgovernment)
   AZ_TF_BACKEND_RG: ""                       # Resource group for Terraform state storage
   AZ_TF_BACKEND_SA: ""                       # Storage account for Terraform state
+
+  # ---------------------------------------------------------------------------
+  # Audit record (WORM) — STR_230
+  # ---------------------------------------------------------------------------
+  # STR_230 TEST: audit records uploaded here. Revert/parameterize before merge to dev.
+  AUDIT_STORAGE_ACCOUNT: "kaastfssandbox00sa"  # account holding the 'audit' container (has correct runner IP allow-list)
+  AUDIT_CONTAINER: "audit"                     # blob container for audit records
+  # N = reuse the Terraform SP session for the upload (no managed identity needed).
+  # Y = use a runner managed identity (production/compliance path; requires MI on runner).
+  AUDIT_USE_MANAGED_IDENTITY: "N"
 
   # ---------------------------------------------------------------------------
   # Gitleaks (SAD - Sensitive Authentication Data)

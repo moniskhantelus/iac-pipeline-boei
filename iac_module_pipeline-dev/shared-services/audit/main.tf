@@ -24,9 +24,24 @@ variable "resource_group_name" { type = string }
 variable "location" { type = string }
 variable "storage_account_name" { type = string }
 variable "state_storage_account_name" { type = string }
+# Additional Terraform state account names to assert separation against (set-based check).
+# Defaults to empty so existing callers keep working with only the single-name check.
+variable "state_storage_account_names" {
+  type    = list(string)
+  default = []
+}
 variable "runner_identity_principal_id" { type = string }
 variable "reviewer_principal_id" { type = string }
 variable "runner_subnet_ids" { type = list(string) }
+# Subnet for the audit storage account's private endpoint NIC (REQ-INT-26).
+variable "private_endpoint_subnet_id" { type = string }
+# Private DNS zone IDs for the blob private endpoint. For Azure Gov the blob private
+# DNS zone is `privatelink.blob.core.usgovcloudapi.net` and must be supplied by the
+# deploying environment. Left empty when DNS is managed centrally.
+variable "private_dns_zone_ids" {
+  type    = list(string)
+  default = []
+}
 
 resource "azurerm_resource_group" "audit" {
   name     = var.resource_group_name
@@ -44,6 +59,9 @@ resource "azurerm_storage_account" "audit" {
   shared_access_key_enabled       = false
   default_to_oauth_authentication = true
   allow_nested_items_to_be_public = false
+  # REQ-INT-26: disable public network access; access is via the private endpoint only.
+  public_network_access_enabled = false
+  # Secondary control: with public access disabled these VNet rules are belt-and-suspenders.
   network_rules {
     default_action             = "Deny"
     bypass                     = ["None"]
@@ -52,10 +70,34 @@ resource "azurerm_storage_account" "audit" {
   lifecycle {
     prevent_destroy = true
     precondition {
-      condition     = lower(var.storage_account_name) != lower(var.state_storage_account_name)
+      condition = (
+        lower(var.storage_account_name) != lower(var.state_storage_account_name) &&
+        !contains([for s in var.state_storage_account_names : lower(s)], lower(var.storage_account_name))
+      )
       error_message = "Audit storage must be separate from Terraform state storage."
     }
   }
+}
+resource "azurerm_private_endpoint" "audit" {
+  name                = "${var.storage_account_name}-blob-pe"
+  resource_group_name = azurerm_resource_group.audit.name
+  location            = azurerm_resource_group.audit.location
+  subnet_id           = var.private_endpoint_subnet_id
+  private_service_connection {
+    name                           = "${var.storage_account_name}-blob-psc"
+    private_connection_resource_id = azurerm_storage_account.audit.id
+    subresource_names              = ["blob"]
+    is_manual_connection           = false
+  }
+  # Only wire a DNS zone group when IDs are supplied; some environments manage DNS centrally.
+  dynamic "private_dns_zone_group" {
+    for_each = length(var.private_dns_zone_ids) > 0 ? [1] : []
+    content {
+      name                 = "${var.storage_account_name}-blob-dns"
+      private_dns_zone_ids = var.private_dns_zone_ids
+    }
+  }
+  lifecycle { prevent_destroy = true }
 }
 resource "azurerm_storage_container" "audit" {
   name                  = "audit"
@@ -93,3 +135,4 @@ resource "azurerm_role_assignment" "reader" {
 output "audit_storage_account" { value = azurerm_storage_account.audit.name }
 output "audit_container" { value = azurerm_storage_container.audit.name }
 output "policy_id" { value = azurerm_storage_container_immutability_policy.audit.id }
+output "private_endpoint_id" { value = azurerm_private_endpoint.audit.id }

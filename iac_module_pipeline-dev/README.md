@@ -1,3 +1,7 @@
+# STR-222 approval gates
+
+See [STR-222 configuration and acceptance runbook](docs/STR-222-approval-gates.md) for the new gate behavior. This supersedes earlier statements about an unchanged placeholder gate or approval placement.
+
 # IaC module pipeline
 
 See [STR-230 implementation, deployment and acceptance notes](STR-230.md).

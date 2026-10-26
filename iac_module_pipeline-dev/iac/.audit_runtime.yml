@@ -21,14 +21,23 @@
       
       
       def login():
-          # Isolate audit MI credentials from the Terraform service principal session.
-          os.environ['AZURE_CONFIG_DIR'] = str(Path(os.environ['CI_PROJECT_DIR']) / '.audit-azure')
-          az('cloud', 'set', '--name', os.environ.get('AZ_CSP_TYPE', 'AzureUSGovernment'))
-          args = ['login', '--identity']
-          if os.environ.get('AUDIT_MI_CLIENT_ID'):
-              args += ['--client-id', os.environ['AUDIT_MI_CLIENT_ID']]
-          az(*args)
-          az('account', 'set', '--subscription', os.environ['AUDIT_SUBSCRIPTION_ID'])
+          # Auth for the audit upload:
+          #   AUDIT_USE_MANAGED_IDENTITY=Y -> log in with the runner managed identity
+          #     (production/compliance path; requires an MI attached to the runner).
+          #   otherwise -> REUSE the Terraform service-principal session the job already
+          #     established earlier (az login --service-principal). We don't start a
+          #     separate login or switch AZURE_CONFIG_DIR, so the existing SP token is used
+          #     for the upload via --auth-mode login. Lets the record upload work on runners
+          #     without a managed identity.
+          if os.environ.get('AUDIT_USE_MANAGED_IDENTITY', 'N') == 'Y':
+              os.environ['AZURE_CONFIG_DIR'] = str(Path(os.environ['CI_PROJECT_DIR']) / '.audit-azure')
+              az('cloud', 'set', '--name', os.environ.get('AZ_CSP_TYPE', 'AzureUSGovernment'))
+              args = ['login', '--identity']
+              if os.environ.get('AUDIT_MI_CLIENT_ID'):
+                  args += ['--client-id', os.environ['AUDIT_MI_CLIENT_ID']]
+              az(*args)
+              if os.environ.get('AUDIT_SUBSCRIPTION_ID'):
+                  az('account', 'set', '--subscription', os.environ['AUDIT_SUBSCRIPTION_ID'])
       
       
       def storage():

@@ -53,11 +53,14 @@ iac_coverity_job:
         exit 0
       fi
 
-    # Validate required variables
+    # Coverity Connect is optional. If no server URL is configured for this project,
+    # skip cleanly (exit 0) instead of failing — the scan is only meaningful when a
+    # Coverity Connect server is wired up. Set COVERITY_SERVER_URL in CI/CD settings
+    # to enable it.
     - |
       if [[ -z "${COVERITY_SERVER_URL}" ]]; then
-        echo "[ERROR] COVERITY_SERVER_URL is not set — configure in CI/CD settings"
-        exit 1
+        echo "[WARN] COVERITY_SERVER_URL is not set — skipping Coverity scan (configure in CI/CD settings to enable)"
+        exit 0
       fi
 
     # Determine scan directory
