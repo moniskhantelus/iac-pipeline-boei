@@ -25,37 +25,43 @@ iac_destroy_job:
     # e.g., dev_feature -> dev, uat_fix -> uat, main -> main
     - BRANCH_PREFIX="${CI_COMMIT_BRANCH%%_*}"
     - BRANCH_PREFIX_UPPER="${BRANCH_PREFIX^^}"
-    - echo "[INFO] BRANCH_PREFIX=${BRANCH_PREFIX} and BRANCH_PREFIX_UPPER=${BRANCH_PREFIX_UPPER}"
+    - BRANCH_PREFIX_LOWER=${BRANCH_PREFIX,,}
+    - echo "[INFO] BRANCH_PREFIX=${BRANCH_PREFIX} and BRANCH_PREFIX_UPPER=${BRANCH_PREFIX_UPPER} and BRANCH_PREFIX_LOWER=${BRANCH_PREFIX_LOWER}"
 
 
-    # Resolve environment-specific CI/CD variables using indirect expansion
-    # CI/CD variables must follow the naming pattern: AZ_<prefix>_<variable>
-    # e.g., AZ_dev_SP_CLIENT_ID, AZ_uat_SP_CLIENT_SECRET
+    # Resolve Azure CI/CD variables. These hold credential VALUES directly (not names),
+    # matching the init/apply jobs. Reference them directly (no indirect ${!...} expansion).
+    - AZ_SUBSCRIPTION_ID="${EIC_KAAS_AZ_dev_SUBSCRIPTION_ID:-}"
+    - AZ_SP_CLIENT_ID="${AZ_dev_SP_CLIENT_ID:-}"
+    - AZ_SP_CLIENT_SECRET="${AZ_dev_SP_CLIENT_SECRET:-}"
+    - AZ_SP_TENANT_ID="${AZ_dev_TENANT_ID:-}"
     - |
-      AZ_SUBSCRIPTION_ID="AZ_${BRANCH_PREFIX_UPPER}_SUBSCRIPTION_ID"
-      AZ_SP_CLIENT_ID="AZ_${BRANCH_PREFIX_UPPER}_SP_CLIENT_ID"
-      AZ_SP_CLIENT_SECRET="AZ_${BRANCH_PREFIX_UPPER}_SP_CLIENT_SECRET"
-      AZ_SP_TENANT_ID="AZ_${BRANCH_PREFIX_UPPER}_TENANT_ID"
+      if [ -z "${AZ_SUBSCRIPTION_ID:-}" ] || \
+         [ -z "${AZ_SP_CLIENT_ID:-}" ] || \
+         [ -z "${AZ_SP_CLIENT_SECRET:-}" ] || \
+         [ -z "${AZ_SP_TENANT_ID:-}" ]; then
+        echo "ERROR: Required Azure authentication variable is missing"
+        exit 1
+      fi
+      echo "[INFO] Azure credentials are populated"
+      # Platform sandbox state backend (has the correct runner IP allow-list).
       AZ_TF_BACKEND_SA_RG="kaas-tfstate-mgmt-rg"
-      AZ_TF_BACKEND_SA="kaastfs${BRANCH_PREFIX_LOWER}00sa"
+      AZ_TF_BACKEND_SA="kaastfssandbox00sa"
       AZ_BACKEND_CONTAINER="tfstate"
-      
-      # ARM_ENVIRONMENT uses the global AZ_TYPE_ENVIRONMENT directly (not indirect)
-      export ARM_ENVIRONMENT="${AZ_CSP_TYPE}"
-      export ARM_SUBSCRIPTION_ID="${!AZ_SUBSCRIPTION_ID}"
-      export ARM_CLIENT_ID="${!AZ_SP_CLIENT_ID}"
-      export ARM_CLIENT_SECRET="${!AZ_SP_CLIENT_SECRET}"
-      export ARM_TENANT_ID="${!AZ_SP_TENANT_ID}"
 
-    - echo "[INFO] ${ARM_ENVIRONMENT} --service-principal -u "${!AZ_SP_CLIENT_ID}" -p "${!AZ_SP_CLIENT_SECRET}" -t "${!AZ_SP_TENANT_ID}""
+      # Cloud comes from AZ_LOGIN_CSP_TYPE (AZ_CSP_TYPE was undefined).
+      export ARM_ENVIRONMENT="${AZ_LOGIN_CSP_TYPE}"
+      export ARM_SUBSCRIPTION_ID="${AZ_SUBSCRIPTION_ID}"
+      export ARM_CLIENT_ID="${AZ_SP_CLIENT_ID}"
+      export ARM_CLIENT_SECRET="${AZ_SP_CLIENT_SECRET}"
+      export ARM_TENANT_ID="${AZ_SP_TENANT_ID}"
 
-    # Authenticate to Azure using the environment-specific Service Principal
-    # AZ_LOGIN_CSP_TYPE is defined in .variables.yml (e.g., AzureUSGovernment)
-    - echo "[INFO] Authenticating to Azure via Service Principal..."
+    # Authenticate to Azure using the Service Principal
+    - echo "[INFO] Authenticating to Azure via Service Principal...${ARM_ENVIRONMENT}"
     - az cloud set --name "${ARM_ENVIRONMENT}"
-    - az login --service-principal -u "${!AZ_SP_CLIENT_ID}" -p "${!AZ_SP_CLIENT_SECRET}" -t "${!AZ_SP_TENANT_ID}"
-    - echo "[INFO] Azure authentication successful ${!AZ_SUBSCRIPTION_ID}"
-    - az account set --subscription "${!AZ_SUBSCRIPTION_ID}"
+    - az login --service-principal -u "${AZ_SP_CLIENT_ID}" -p "${AZ_SP_CLIENT_SECRET}" -t "${AZ_SP_TENANT_ID}"
+    - echo "[INFO] Azure authentication successful"
+    - az account set --subscription "${AZ_SUBSCRIPTION_ID}"
     - echo "[INFO] Azure authentication successful"
 
     # Dynamically generate the Terraform provider and backend configuration
@@ -108,6 +114,8 @@ iac_destroy_job:
       resource_group_name  = "${AZ_TF_BACKEND_SA_RG}"
       storage_account_name = "${AZ_TF_BACKEND_SA}"
       container_name       = "${AZ_BACKEND_CONTAINER}"
+      environment          = "usgovernment"
+      use_azuread_auth     = true
       key                  = "terraform/$CI_PROJECT_NAME/$CI_COMMIT_BRANCH/$CI_PROJECT_NAME-$CI_COMMIT_BRANCH.tfstate"  
       EOF  
 
@@ -115,7 +123,7 @@ iac_destroy_job:
       terraform -chdir=examples/basic init -backend-config=$CI_PROJECT_DIR/examples/basic/backend.hcl
       terraform -chdir=examples/basic destroy -var-file=terraform.tfvars -auto-approve
       echo "[TEST: Example Base] Executing the terraform example folder "
-    - cat $CI_PROJECT_DIR/backend.hcl
+    - cat $CI_PROJECT_DIR/examples/basic/backend.hcl || true
     - ls -la
 
     #- |
@@ -123,3 +131,11 @@ iac_destroy_job:
     #  terraform -chdir=examples/complete init 
     #  terraform -chdir=examples/complete destroy -var-file=terraform.tfvars -auto-approve
     #  echo "[TEST: Example Complete] Executing the terraform example folder Completed " 
+
+  # Destroy is destructive AND optional ("only when we need to tear down").
+  # when:manual     -> never runs automatically; requires an explicit click.
+  # allow_failure:true -> OPTIONAL: the pipeline completes successfully without it,
+  #                       so destroy does not leave the pipeline "blocked" waiting.
+  #                       It sits as a manual button to trigger on demand.
+  when: manual
+  allow_failure: true

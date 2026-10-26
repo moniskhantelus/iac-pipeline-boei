@@ -1,0 +1,14 @@
+# Example backend wiring for the audit-store stack's OWN Terraform state.
+#
+# IMPORTANT: This stack's state MUST NOT live in the WORM audit container (strataaudit /
+# audit-records). Terraform rewrites its state blob on every apply, and a locked immutable
+# container would reject those rewrites. Point this at an ORDINARY (non-WORM) state location,
+# e.g. the existing tfstate account.
+#
+# Copy to backend.hcl and fill in real values (never commit secrets):
+#
+# resource_group_name  = "kaas-tfstate-mgmt-rg"
+# storage_account_name = "kaastfsshared00sa"      # a NON-WORM state account (NOT strataaudit)
+# container_name       = "tfstate"
+# environment          = "usgovernment"
+# key                  = "terraform/audit-store/audit-store.tfstate"

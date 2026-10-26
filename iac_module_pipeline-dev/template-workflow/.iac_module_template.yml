@@ -20,6 +20,9 @@ default:
 
 workflow: 
   rules:
+    # TEMP TEST SCAFFOLDING (STR_230): trigger pipeline on this test branch. Revert before merge to dev.
+    - if: '$CI_COMMIT_BRANCH == "STR_230"'
+      when: always
     - if: '$CI_COMMIT_BRANCH =~  /(\b^(sandbox)+(_[a-zA-Z0-9_]+)?\b)/ '
       when: always    
     - if: '$CI_COMMIT_BRANCH =~  /(\b^(dev)+(_[a-zA-Z0-9_]+)?\b)/ '
@@ -39,54 +42,54 @@ workflow:
 include:
   - project: 'kaas/pipelines/iac_module_pipeline'
     file: '/iac/.audit_runtime.yml'
-    ref: dev
+    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge.
 
   # Variables
   - project: 'kaas/pipelines/iac_module_pipeline'
     file: '/variables/.variables.yml'
-    ref: dev
+    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge.
 
   # gitleaks
   - project: 'kaas/pipelines/iac_module_pipeline'
     file: '/scan/gitleaks/.gitleaks.yml'
-    ref: dev
+    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge.
 
   # checkcov
   - project: 'kaas/pipelines/iac_module_pipeline'
     file: '/scan/checkov/.checkov.yml'
-    ref: dev 
+    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge. 
 
   # checkcov
   - project: 'kaas/pipelines/iac_module_pipeline'
     file: '/scan/coverity/.coverity.yml'
-    ref: dev 
+    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge. 
 
   # checkcov
   - project: 'kaas/pipelines/iac_module_pipeline'
     file: '/scan/terrascan/.terrascan.yml'
-    ref: dev 
+    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge. 
 
     # checkcov
   - project: 'kaas/pipelines/iac_module_pipeline'
     file: '/lint/tflint/.tflint.yml'
-    ref: dev 
+    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge. 
 
       # checkcov
   - project: 'kaas/pipelines/iac_module_pipeline'
     file: '/iac/.iac_tf_init.yml'
-    ref: dev 
+    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge. 
 
   - project: 'kaas/pipelines/iac_module_pipeline'
     file: '/iac/.iac_tf_apply.yml'
-    ref: dev 
+    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge. 
   
   - project: 'kaas/pipelines/iac_module_pipeline'
     file: '/iac/.iac_gates_job.yml'  
-    ref: dev 
+    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge. 
 
   - project: 'kaas/pipelines/iac_module_pipeline'
     file: '/iac/.iac_tf_destroy.yml'
-    ref: dev 
+    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge. 
 
 
 stages:
@@ -96,6 +99,6 @@ stages:
  - iac_coverity
  - lint
  - iac_init
- - iac_apply
  - iac_approval
+ - iac_apply
  - iac_destroy
