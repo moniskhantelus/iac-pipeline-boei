@@ -1,0 +1,157 @@
+# =============================================================================
+# GitLab CI Job: Infrastructure as Code (IaC) Static Analysis
+# Purpose: Scans IaC files (Terraform, CloudFormation, Kubernetes, Dockerfiles)
+#          for security misconfigurations and compliance violations using Checkov.
+# Reference: https://www.checkov.io/
+# =============================================================================
+iac_static_analysis_job:
+  # Stage in the CI pipeline where this job runs
+  stage: iac_sast
+
+  # Docker image used for running Checkov
+  # Variables CHECKOV_IMAGE and CHECKOV_IMAGE_VERSION should be defined in CI/CD settings
+  image: ${CHECKOV_IMAGE}:${CHECKOV_IMAGE_VERSION}
+
+  # Rules determine when this job is triggered
+  # The job runs on ALL branches and merge requests to catch misconfigurations early
+  #rules:
+  #  - when: always    # Execute on every pipeline regardless of branch or event
+
+  # Artifacts are files preserved after the job completes
+  # Reports are saved regardless of pass/fail so results can be reviewed
+  artifacts:
+    paths:
+      - reports/checkov-report.json          # Scan results in JSON format
+      - reports/checkov-report-junit.xml     # Scan results in JUnit XML format
+    reports:
+      junit: reports/checkov-report-junit.xml  # Enables test report visualization in GitLab MR
+    when: always                             # Save artifact even if the job fails
+
+  # Job execution steps
+  script:
+    - echo "=============== IaC Static Analysis (Checkov) ================================"
+    - echo "Info>> PreScan Event Trigger Please wait for IaC security check ....."
+    - echo "Info>> Docker image ${CHECKOV_IMAGE}:${CHECKOV_IMAGE_VERSION}"
+    - echo "List of files and directory of parent folder"
+    - pwd
+    - ls
+    - echo "Triggered the Checkov scan for IaC security analysis ........"
+    # Check if Checkov scan should be skipped via CI/CD variable
+    # Set CHECKOV_SCAN_SKIP=Y in CI/CD variables to bypass (not recommended)
+    - |
+      if [[ "${CHECKOV_SCAN_SKIP}" == "Y" ]]; then
+        echo "Skipping the Checkov scan - this is not good practice"
+      else
+        # Run Checkov against the project directory
+        # NOTE: --output accepts only ONE format per invocation
+        # --output-file-path creates a DIRECTORY, not a file — Checkov puts
+        #   results_json.json / results_junitxml.xml inside that directory.
+        # We use a staging directory and then move the actual file out.
+        # --framework: specify frameworks to scan
+        # --compact: reduce output verbosity for cleaner logs
+        # --download-external-modules: resolve and scan external Terraform modules
+
+        # Create reports directory
+        mkdir -p "${CI_PROJECT_DIR}/reports"
+
+        # 1. Console output (human-readable) — shows results in pipeline log
+        # --soft-fail: always exit 0 so we can control failure logic ourselves
+        checkov \
+          --directory "${CI_PROJECT_DIR}" \
+          --skip-path examples \
+          --output cli \
+          --framework terraform cloudformation kubernetes dockerfile \
+          --compact \
+          --soft-fail \
+          --download-external-modules true
+
+        # 2. JSON report (silenced — output hidden from console)
+        checkov \
+          --directory "${CI_PROJECT_DIR}" \
+          --skip-path examples \
+          --output json \
+          --output-file-path "${CI_PROJECT_DIR}/reports/checkov-json-staging" \
+          --framework terraform cloudformation kubernetes dockerfile \
+          --compact \
+          --soft-fail \
+          --download-external-modules true > /dev/null 2>&1 || true
+
+        # Move actual JSON file from staging directory
+        if [[ -d "${CI_PROJECT_DIR}/reports/checkov-json-staging" ]]; then
+          mv "${CI_PROJECT_DIR}/reports/checkov-json-staging/results_json.json" \
+             "${CI_PROJECT_DIR}/reports/checkov-report.json" 2>/dev/null || true
+          rm -rf "${CI_PROJECT_DIR}/reports/checkov-json-staging"
+        fi
+
+        # 3. JUnit XML report (silenced — output hidden from console)
+        checkov \
+          --directory "${CI_PROJECT_DIR}" \
+          --skip-path examples \
+          --output junitxml \
+          --output-file-path "${CI_PROJECT_DIR}/reports/checkov-xml-staging" \
+          --framework terraform cloudformation kubernetes dockerfile \
+          --compact \
+          --soft-fail \
+          --download-external-modules true > /dev/null 2>&1 || true
+
+        # Move actual XML file from staging directory
+        if [[ -d "${CI_PROJECT_DIR}/reports/checkov-xml-staging" ]]; then
+          mv "${CI_PROJECT_DIR}/reports/checkov-xml-staging/results_junitxml.xml" \
+             "${CI_PROJECT_DIR}/reports/checkov-report-junit.xml" 2>/dev/null || true
+          rm -rf "${CI_PROJECT_DIR}/reports/checkov-xml-staging"
+        fi
+
+        # Generate summary table from JSON report
+        echo ""
+        echo "=============== Checkov Summary Table ================================"
+        HAS_HIGH_CRITICAL="N"
+        if [[ -f "${CI_PROJECT_DIR}/reports/checkov-report.json" ]] && command -v jq &>/dev/null; then
+          PASSED=$(jq '[.results.passed_checks // []] | flatten | length' "${CI_PROJECT_DIR}/reports/checkov-report.json" 2>/dev/null || echo 0)
+          FAILED=$(jq '[.results.failed_checks // []] | flatten | length' "${CI_PROJECT_DIR}/reports/checkov-report.json" 2>/dev/null || echo 0)
+          SKIPPED=$(jq '[.results.skipped_checks // []] | flatten | length' "${CI_PROJECT_DIR}/reports/checkov-report.json" 2>/dev/null || echo 0)
+
+          # Count by severity
+          HIGH_CRITICAL=$(jq '[.results.failed_checks // []] | flatten | [.[] | select(.severity == "HIGH" or .severity == "CRITICAL")] | length' "${CI_PROJECT_DIR}/reports/checkov-report.json" 2>/dev/null || echo 0)
+          LOW_MEDIUM=$(jq '[.results.failed_checks // []] | flatten | [.[] | select(.severity == "LOW" or .severity == "MEDIUM" or .severity == null)] | length' "${CI_PROJECT_DIR}/reports/checkov-report.json" 2>/dev/null || echo 0)
+
+          printf "\n%-15s | %-10s\n" "Status" "Count"
+          printf "%-15s | %-10s\n" "---------------" "----------"
+          printf "%-15s | %-10s\n" "Passed" "${PASSED}"
+          printf "%-15s | %-10s\n" "Failed (H/C)" "${HIGH_CRITICAL}"
+          printf "%-15s | %-10s\n" "Failed (L/M)" "${LOW_MEDIUM}"
+          printf "%-15s | %-10s\n" "Skipped" "${SKIPPED}"
+          printf "%-15s | %-10s\n" "---------------" "----------"
+          printf "%-15s | %-10s\n" "TOTAL" "$((PASSED + FAILED + SKIPPED))"
+
+          # Show failed checks detail table
+          if [[ "${FAILED}" -gt 0 ]]; then
+            echo ""
+            printf "%-10s | %-15s | %-45s | %-25s | %-6s\n" "Severity" "Check ID" "Check Name" "Resource" "File"
+            printf "%-10s | %-15s | %-45s | %-25s | %-6s\n" "----------" "---------------" "---------------------------------------------" "-------------------------" "------"
+            jq -r '[.results.failed_checks // []] | flatten | .[] | [(.severity // "UNKNOWN"), .check_id, .check_result.name, .resource, .file_path] | @tsv' \
+              "${CI_PROJECT_DIR}/reports/checkov-report.json" 2>/dev/null | \
+              while IFS=$'\t' read -r severity check_id check_name resource file_path; do
+                printf "%-10s | %-15s | %-45s | %-25s | %-6s\n" "${severity}" "${check_id}" "${check_name:0:45}" "${resource:0:25}" "${file_path}"
+              done
+          fi
+
+          # Determine if HIGH/CRITICAL issues exist
+          if [[ "${HIGH_CRITICAL}" -gt 0 ]]; then
+            HAS_HIGH_CRITICAL="Y"
+          fi
+        else
+          echo "[WARN] Unable to generate summary — jq not available or report not found"
+        fi
+        echo "====================================================================="
+
+        # Fail only on HIGH/CRITICAL severity — warnings (LOW/MEDIUM) pass
+        if [[ "${HAS_HIGH_CRITICAL}" == "Y" ]]; then
+          echo "[ERROR] Checkov found ${HIGH_CRITICAL} HIGH/CRITICAL security issues — job failed"
+          exit 1
+        elif [[ "${FAILED:-0}" -gt 0 ]]; then
+          echo "[WARN] Checkov found ${LOW_MEDIUM} LOW/MEDIUM warnings — proceeding (warnings do not block pipeline)"
+        fi
+
+        echo "Scan completed"
+      fi
+  allow_failure: false

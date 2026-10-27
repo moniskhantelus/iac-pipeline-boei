@@ -1,0 +1,178 @@
+# =============================================================================
+# GitLab CI Job: Terraform Init + Plan (Azure)
+# Purpose: Initializes the Terraform working directory for Azure infrastructure.
+#          Authenticates to Azure via Service Principal, generates the provider
+#          and backend configuration dynamically, then runs terraform init/plan.
+# =============================================================================
+
+iac_init_job:
+  stage: iac_init
+
+  # TERRAFORM_IMAGE and TERRAFORM_IMAGE_VERSION injected via dotenv from pre_work_job
+  image: "${TERRAFORM_IMAGE}:${TERRAFORM_IMAGE_VERSION}"
+
+  variables:
+    GIT_SSL_NO_VERIFY: "true"    # Bypass SSL verification for Git operations
+
+  script:
+    - set -eo pipefail
+    - !reference [.str230_runtime, script]
+    # Exit immediately on error; propagate errors through pipes
+    # Must be first to catch all failures including az login
+    #- set -eo pipefail
+
+    - echo "[INFO] Provisioning process started"
+
+    # Ensure the reports directory exists for captured console output
+    - mkdir -p "${CI_PROJECT_DIR}/reports"
+    - mkdir -p "${CI_PROJECT_DIR}/reports/terraform"
+
+
+    # Extract branch prefix (value before first underscore)
+    # e.g., dev_feature -> dev, uat_fix -> uat, main -> main
+    - BRANCH_PREFIX="${CI_COMMIT_BRANCH%%_*}"
+    - BRANCH_PREFIX_UPPER="${BRANCH_PREFIX^^}"
+    - BRANCH_PREFIX_LOWER=${BRANCH_PREFIX,,}
+    - echo "[INFO] BRANCH_PREFIX=${BRANCH_PREFIX} and BRANCH_PREFIX_UPPER=${BRANCH_PREFIX_UPPER} and BRANCH_PREFIX_LOWER=${BRANCH_PREFIX_LOWER}"
+
+
+    # Resolve environment-specific CI/CD variables using indirect expansion
+    # CI/CD variables must follow the naming pattern: AZ_<prefix>_<variable>
+    # e.g., AZ_dev_SP_CLIENT_ID, AZ_uat_SP_CLIENT_SECRET
+    - AZ_SUBSCRIPTION_ID="${EIC_KAAS_AZ_dev_SUBSCRIPTION_ID:-}"
+    - AZ_SP_CLIENT_ID="${AZ_dev_SP_CLIENT_ID:-}"
+    - AZ_SP_CLIENT_SECRET="${AZ_dev_SP_CLIENT_SECRET:-}"
+    - AZ_SP_TENANT_ID="${AZ_dev_TENANT_ID:-}"
+    - |
+      if [ -z "${AZ_SUBSCRIPTION_ID:-}" ] || \
+         [ -z "${AZ_SP_CLIENT_ID:-}" ] || \
+         [ -z "${AZ_SP_CLIENT_SECRET:-}" ] || \
+         [ -z "${AZ_SP_TENANT_ID:-}" ]; then
+        echo "ERROR: Required Azure authentication variable is missing"
+        exit 1
+      fi
+      echo "[INFO] Azure credentials are populated"
+      # Platform sandbox state backend (has the correct runner IP allow-list).
+      # use_azuread_auth=true (below) authenticates as the SP via AAD, avoiding ListKeys.
+      AZ_TF_BACKEND_SA_RG="kaas-tfstate-mgmt-rg"
+      AZ_TF_BACKEND_SA="kaastfssandbox00sa"
+      AZ_BACKEND_CONTAINER="tfstate"
+
+
+      # The AZ_* variables above hold credential VALUES directly (not names), so reference
+      # them directly (no indirect ${!...} expansion). Cloud comes from AZ_LOGIN_CSP_TYPE.
+      export ARM_ENVIRONMENT="${AZ_LOGIN_CSP_TYPE}"
+      export ARM_SUBSCRIPTION_ID="${AZ_SUBSCRIPTION_ID}"
+      export ARM_CLIENT_ID="${AZ_SP_CLIENT_ID}"
+      export ARM_CLIENT_SECRET="${AZ_SP_CLIENT_SECRET}"
+      export ARM_TENANT_ID="${AZ_SP_TENANT_ID}"
+
+
+    # Authenticate to Azure using the environment-specific Service Principal
+    # AZ_LOGIN_CSP_TYPE is defined in .variables.yml (e.g., AzureUSGovernment)
+    - echo "[INFO] Authenticating to Azure via Service Principal...${ARM_ENVIRONMENT}"
+    - az cloud set --name "${ARM_ENVIRONMENT}"
+    - az cloud show
+    - az login --service-principal -u "${AZ_SP_CLIENT_ID}" -p "${AZ_SP_CLIENT_SECRET}" -t "${AZ_SP_TENANT_ID}"
+    - echo "[INFO] Azure authentication successful"
+    - az account set --subscription "${AZ_SUBSCRIPTION_ID}"
+    - echo "[INFO] Azure authentication successful"
+
+    # Dynamically generate the Terraform provider and backend configuration
+    # Single terraform{} block containing both required_providers and backend
+    # AZ_TF_BACKEND_RG and AZ_TF_BACKEND_SA must be set as GitLab CI/CD variables
+
+    - ls -la
+
+    # Show Terraform version for audit purposes
+    - terraform version
+    # Delete the local plugin cache
+    #- rm -rf .terraform/
+    # Delete the lock file safely
+    #- rm -f .terraform.lock.hcl
+    - |
+      mkdir -p "$HOME/.terraform.d/plugin-cache"
+      cat > "$HOME/.terraformrc" <<'EOF'
+      plugin_cache_dir   = "$HOME/.terraform.d/plugin-cache"
+      disable_checkpoint = true
+      provider_installation {
+       direct {
+        exclude = ["registry.terraform.io/*/*"]
+       }
+       network_mirror {
+        url = "https://sres.web.boeing.com/artifactory/api/terraform/ecs-hashicorp-remote-releases/providers/"
+       }
+      }
+      EOF
+      export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
+    - |
+      #cd examples/basic-deployment
+      echo "[TEST: Example Base] Executing the terraform example folder Started  "
+      echo "Executing the terraform test folder list providers "
+      #terraform -chdir=examples/basic-deployment providers
+      echo "Executing the terraform test folder init "
+    - |
+      cat > backend.hcl <<EOF
+      resource_group_name  = "${AZ_TF_BACKEND_SA_RG}"
+      storage_account_name = "${AZ_TF_BACKEND_SA}"
+      container_name       = "${AZ_BACKEND_CONTAINER}"
+      environment          = "usgovernment"  
+      use_azuread_auth     = true
+      key                  = "terraform/$CI_PROJECT_NAME/$CI_COMMIT_BRANCH/$CI_PROJECT_NAME-$CI_COMMIT_BRANCH.tfstate"  
+      EOF
+    - cd examples/basic
+    - | 
+      cat > provider_override.tf <<EOF
+      terraform {
+        required_version = ">= 1.6.0"
+        required_providers {
+            azurerm = {
+              source  = "hashicorp/azurerm"
+              # "~> 4.80" = >=4.80,<5.0 (whole 4.x line from 4.80). Compatible with consumer
+              # modules that require >=4.81; "~> 4.80.0" wrongly capped at <4.81 and conflicted.
+              version = "~> 4.80"
+            }
+        }
+        backend "azurerm" {}
+      }
+
+      provider "azurerm" {
+          environment = "usgovernment"
+          features {}
+      }
+      EOF
+    - cat "../../backend.hcl" 
+    - cat provider_override.tf
+    #- |
+    #  terraform init -backend-config="../../backend.hcl" -reconfigure
+    #  terraform plan
+    #  #terraform -chdir=examples/basic init
+    #  #terraform -chdir=examples/basic plan -var-file=terraform.tfvars
+    #  echo "[TEST: Example Base] Executing the terraform example folder "
+
+    - |
+      terraform init -backend-config="../../backend.hcl" -reconfigure 2>&1 | tee "${CI_PROJECT_DIR}/reports/terraform/terraform-init-output.txt"
+      terraform plan -no-color -var-file=terraform.tfvars -out="${CI_PROJECT_DIR}/reports/terraform/plan.tfplan" 2>&1 | tee "${CI_PROJECT_DIR}/reports/terraform/terraform-plan-output.txt"
+    # Plan hash (dependency for STR-230 audit-record component). The component reads
+    # ${TF_ROOT}/plan.tfplan.sha256; write it at the repo root so the apply/audit stage finds it.
+    - |
+      sha256sum "${CI_PROJECT_DIR}/reports/terraform/plan.tfplan" | awk '{print $1}' > "${CI_PROJECT_DIR}/plan.tfplan.sha256"
+      echo "[INFO] plan hash: $(cat ${CI_PROJECT_DIR}/plan.tfplan.sha256)"
+    - ls -la
+    - cat $CI_PROJECT_DIR/backend.hcl
+    #- |
+    #  echo "[TEST: Example Complete] Executing the terraform example folder Start "
+    #  terraform -chdir=examples/complete init 
+    #  terraform -chdir=examples/complete plan -var-file=terraform.tfvars
+    #  echo "[TEST: Example Complete] Executing the terraform example folder Completed " 
+  artifacts:
+    paths:
+      - reports/terraform/terraform-init-output.txt
+      - reports/terraform/terraform-plan-output.txt
+      - reports/terraform/plan.tfplan
+      - plan.tfplan.sha256
+      - examples/basic/provider_override.tf
+      - examples/basic/.terraform.lock.hcl
+    expire_in: 90 days
+    when: always
+  allow_failure: false
