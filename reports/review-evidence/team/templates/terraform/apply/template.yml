@@ -1,0 +1,113 @@
+spec:
+  inputs:
+    job_name:
+      description: "CI job name. Allows the component to be included more than once."
+      default: tf-apply
+    stage:
+      description: "Stage this job runs in. Consumer must declare it in its stages list."
+      default: apply
+    environment:
+      description: "Target environment (dev|uat|prod|...). Scopes state key and GitLab environment."
+      # required — no default
+    tf_root:
+      description: "Path to the Terraform root to apply, relative to the repo root."
+      # required — no default
+    plan_job:
+      description: "Name of the terraform/plan job that produced the plan artifact (used in needs)."
+      default: tf-plan
+    terraform_image:
+      description: "Boeing-internal Terraform image (no Docker Hub, no :latest)."
+      default: "registry.web.boeing.com/amp/docker-images/terraform/terraform-azure/ubi8minimal-azterraform/v1.9.2"
+    terraform_image_version:
+      description: "Tag of the Terraform image."
+      default: "26.04.15"
+    arm_environment:
+      description: "Azure cloud for the azurerm provider (AzureUSGovernment for Gov)."
+      default: "AzureUSGovernment"
+  component:
+    - name
+    - version
+---
+
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: "$[[ inputs.terraform_image ]]:$[[ inputs.terraform_image_version ]]"
+  environment:
+    name: $[[ inputs.environment ]]
+    action: start
+  variables:
+    # STR-299 (Rec 5 — harden credentials / control toolchain): disabling Git TLS verification is a
+    # man-in-the-middle risk and was flagged for removal. The Boeing-internal Terraform image already
+    # trusts the corporate CA, so clone/fetch over HTTPS verifies normally. Do NOT re-enable the
+    # bypass; if a specific internal host is untrusted, install its CA cert rather than turning
+    # verification off globally.
+    # GIT_SSL_NO_VERIFY: "true"   # REMOVED (STR-299 Rec 5) — do not reinstate
+    GIT_SSL_NO_VERIFY: "false"
+    TF_ROOT: "$[[ inputs.tf_root ]]"
+    TF_ENV: "$[[ inputs.environment ]]"
+  # Pull the reviewed plan from the plan job. No re-plan happens here.
+  needs:
+    - job: "$[[ inputs.plan_job ]]"
+      artifacts: true
+  rules:
+    # Apply only on the protected environment branches, never on feature branches or MRs.
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH =~ /^(dev|uat|main)(_[a-zA-Z0-9_]+)?$/'
+      when: on_success
+    - when: never
+  script:
+    - set -euo pipefail
+    # --- Guard: static credentials are prohibited (zero-static-credential requirement) ---
+    - |
+      if [ -n "${ARM_CLIENT_SECRET:-}" ]; then
+        echo "[ERROR] ARM_CLIENT_SECRET is set. Static credentials are prohibited. Use Managed Identity." >&2
+        exit 1
+      fi
+    # --- Managed Identity auth. ARM_USE_MSI drives the azurerm provider. ---
+    - export ARM_USE_MSI="true"
+    - export ARM_ENVIRONMENT="$[[ inputs.arm_environment ]]"
+    - 'echo "[INFO] Authenticating with Managed Identity (ARM_USE_MSI=true, env=${ARM_ENVIRONMENT})"'
+    - az cloud set --name "${ARM_ENVIRONMENT}"
+    - az login --identity --output none
+    - az account show --query '{subscription:name, id:id}' -o json
+    # --- Integrity check: the plan we apply MUST be the plan that was reviewed ---
+    - cd "${TF_ROOT}"
+    - |
+      if [ ! -f plan.tfplan ] || [ ! -f plan.tfplan.sha256 ]; then
+        echo "[ERROR] plan.tfplan or plan.tfplan.sha256 not found. Did the ${TF_ROOT} plan job run and pass its artifacts?" >&2
+        exit 1
+      fi
+    - |
+      echo "[INFO] Verifying plan binary integrity..."
+      if ! sha256sum -c plan.tfplan.sha256; then
+        echo "[ERROR] Plan binary hash mismatch — aborting apply" >&2
+        exit 1
+      fi
+      echo "[INFO] Plan integrity verified."
+    # --- init against the real backend, then apply the SAVED plan only ---
+    - terraform version
+    - terraform init -reconfigure -backend-config="backend.${TF_ENV}.hcl"
+    # NO -auto-approve. NO -var-file. NO re-plan. Apply the reviewed artifact verbatim.
+    # STR-230 (artifact capture): the declared apply.log must actually be WRITTEN, on both success
+    # and failure. `tee` the apply output to apply.log; PIPESTATUS[0] preserves terraform's exit
+    # code (not tee's) so a failed apply still fails the job AND leaves a downloadable log.
+    - |
+      set +e
+      terraform apply plan.tfplan 2>&1 | tee apply.log
+      APPLY_RC=${PIPESTATUS[0]}
+      set -e
+      if [ "${APPLY_RC}" -ne 0 ]; then
+        echo "[ERROR] terraform apply failed (exit ${APPLY_RC}) for ${TF_ENV} — see apply.log" | tee -a apply.log
+        exit "${APPLY_RC}"
+      fi
+    - 'echo "[INFO] Apply complete for environment ${TF_ENV} (component $CI_PROJECT_PATH@$CI_COMMIT_SHORT_SHA)" | tee -a apply.log'
+  artifacts:
+    # STR-230: operational retention is 90 days; the immutable WORM store (see
+    # compliance-gates/audit-record) is the compliance record of truth with its own retention.
+    name: "apply-$[[ inputs.environment ]]-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - "$[[ inputs.tf_root ]]/apply.log"
+    expire_in: 90 days
+    when: always
+  allow_failure: false

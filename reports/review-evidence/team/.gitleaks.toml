@@ -1,0 +1,72 @@
+# =============================================================================
+# Gitleaks config for kaas/pipelines/components
+# -----------------------------------------------------------------------------
+# Story  : STR-226 (extended to components)
+# Purpose: components is an Azure / Terraform CI/CD component repo. The
+#          realistic secret leak here is an Azure credential (client_secret,
+#          ARM_CLIENT_SECRET, storage AccountKey, connection string) — NOT an
+#          AWS key. The gitleaks DEFAULT ruleset does not catch a bare
+#          `client_secret = "<value>"`, so we extend it with Azure/Terraform
+#          rules below.
+#
+# `useDefault = true` keeps ALL built-in gitleaks rules (AWS keys, GitHub
+# tokens, PEM blocks, etc.) and ADDS the custom rules in this file.
+# =============================================================================
+title = "components gitleaks config"
+
+[extend]
+useDefault = true
+
+# -----------------------------------------------------------------------------
+# Custom rules — Azure / Terraform secret patterns
+# -----------------------------------------------------------------------------
+
+[[rules]]
+id = "azure-client-secret-assignment"
+description = "Azure client secret assigned in HCL/YAML/env (client_secret / ARM_CLIENT_SECRET)"
+# Matches: client_secret = "..."  |  ARM_CLIENT_SECRET: "..."  |  client-secret="..."
+regex = '''(?i)(arm_client_secret|client[_-]?secret)\s*[:=]\s*["']?[0-9a-z~._\-]{12,}["']?'''
+keywords = ["client_secret", "client-secret", "arm_client_secret"]
+
+[[rules]]
+id = "azure-storage-account-key"
+description = "Azure Storage account key (AccountKey=... in a connection string)"
+regex = '''(?i)AccountKey\s*=\s*[A-Za-z0-9+/=]{64,}'''
+keywords = ["accountkey"]
+
+[[rules]]
+id = "azure-storage-connection-string"
+description = "Azure Storage connection string"
+regex = '''(?i)DefaultEndpointsProtocol=https;AccountName=[^;]+;AccountKey=[A-Za-z0-9+/=]{64,}'''
+keywords = ["defaultendpointsprotocol", "accountkey"]
+
+[[rules]]
+id = "azure-sas-token"
+description = "Azure Shared Access Signature (SAS) token signature"
+regex = '''(?i)[?&]sig=[A-Za-z0-9%+/=]{40,}'''
+keywords = ["sig="]
+
+[[rules]]
+id = "arm-access-key-env"
+description = "ARM_ACCESS_KEY / ARM_SAS_TOKEN assignment"
+regex = '''(?i)(arm_access_key|arm_sas_token)\s*[:=]\s*["']?[A-Za-z0-9+/=]{20,}["']?'''
+keywords = ["arm_access_key", "arm_sas_token"]
+
+# -----------------------------------------------------------------------------
+# Allowlist — avoid false positives on obvious non-secrets.
+# NOTE: deliberately NOT allowlisting EXAMPLE/placeholder values, because the
+# CI safety net should still flag a developer committing an example-shaped
+# secret. Keep this list minimal.
+# -----------------------------------------------------------------------------
+[allowlist]
+description = "Global allowlist for known-safe paths/values"
+paths = [
+  '''(.*?)\.md$''',          # documentation prose (examples live in READMEs)
+  '''tests/fixtures/.*''',   # test fixtures are intentionally crafted inputs
+]
+# Common placeholder tokens that are not real secrets (input variable refs etc.)
+regexes = [
+  '''\$\[\[\s*inputs\..*?\]\]''',   # GitLab component input interpolation
+  '''\$\{[A-Z_]+\}''',               # ${VAR} shell/CI variable references
+  '''\$[A-Z_]+''',                   # $VAR references
+]

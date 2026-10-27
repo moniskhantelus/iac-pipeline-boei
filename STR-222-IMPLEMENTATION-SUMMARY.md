@@ -1,3 +1,5 @@
+> SUPERSEDED: see FIXES-AND-DEPLOYMENT.md for the corrected implementation and remaining acceptance steps.
+
 # STR-222 Implementation Summary — Environment-Specific Approval Gate
 
 **Approach: consume the official KaaS component, not a custom gate.**

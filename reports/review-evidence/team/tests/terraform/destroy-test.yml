@@ -1,0 +1,62 @@
+# Self-test: terraform/destroy performs a real Azure teardown (Managed Identity + remote backend),
+# so it CANNOT be executed hermetically in CI without credentials and live state. This test is
+# therefore an INJECTION + CONFIGURATION contract test: it proves the component injects a job with
+# the required safety guards, without destroying anything.
+#
+# What is asserted (static, against the published template at this revision):
+#   1. GitLab environment event wiring: environment: { name, action: stop }.
+#   2. Master switch: destruction runs ONLY when destroy_enabled == "true" (default no-op).
+#   3. Persistent-environment guard: confirm_destroy must match the environment name.
+#   4. Managed Identity enforced; a static ARM_CLIENT_SECRET is rejected.
+#   5. Reviews a SAVED destroy plan (plan -destroy -out) then applies it (no ad-hoc destroy).
+#
+# NOTE: we intentionally include the component with destroy_enabled unset (defaults to "false")
+# AND keep the injected job manual + allow_failure, so no teardown is ever scheduled by the
+# self-test. We assert the template contract.
+include:
+  # LOCAL include (not catalog component:@SHA) so the self-test resolves on any branch without a
+  # CI/CD Catalog release. See validate-test.yml for the rationale. (STR-299.)
+  - local: templates/terraform/destroy/template.yml
+    inputs:
+      job_name: test-tf-destroy-contract
+      stage: test
+      environment: test
+      tf_root: tests/fixtures/terraform-local
+      # destroy_enabled intentionally omitted -> defaults to "false" (no-op guard).
+
+# The injected destroy job must never run during the self-test (it would need Azure creds and
+# would attempt a teardown). Override it to be manual + allow_failure so it stays dormant and the
+# pipeline still passes.
+test-tf-destroy-contract:
+  rules:
+    - when: manual
+      allow_failure: true
+
+assert-destroy-contract:
+  stage: test
+  # Only needs a shell + grep; use a runner-pullable image (not ecs-catalog, which the PROD runner
+  # cannot pull — see STR-214). Override via ASSERT_IMAGE.
+  image: "${ASSERT_IMAGE}"
+  variables:
+    ASSERT_IMAGE: "registry.web.boeing.com/amp/docker-images/terraform/terraform-azure/ubi8minimal-azterraform/v1.9.2:26.04.15"
+  script:
+    - set -euo pipefail
+    - tpl=templates/terraform/destroy/template.yml
+    # 1. GitLab environment event wiring (stop)
+    - 'grep -Eq ''^\s*action:\s*stop\s*$'' "$tpl" || { echo "[FAIL] missing environment action stop"; exit 1; }'
+    - grep -Eq '^\s*name:\s*\$\[\[ inputs.environment \]\]' "$tpl" || { echo "[FAIL] environment name not wired to input"; exit 1; }
+    # 2. Master switch: no destroy unless destroy_enabled == "true"
+    - grep -q 'DESTROY_ENABLED' "$tpl" || { echo "[FAIL] destroy_enabled guard missing"; exit 1; }
+    - grep -q 'Destruction is DISABLED' "$tpl" || { echo "[FAIL] disabled no-op message missing"; exit 1; }
+    - grep -Eq 'if \[ "\$\{DESTROY_ENABLED\}" != "true" \]' "$tpl" || { echo "[FAIL] master-switch comparison missing"; exit 1; }
+    # 3. Persistent-environment guard: confirm_destroy must match the environment name
+    - grep -q 'PERSISTENT_ENVIRONMENTS' "$tpl" || { echo "[FAIL] persistent-env guard missing"; exit 1; }
+    - grep -q 'CONFIRM_DESTROY' "$tpl" || { echo "[FAIL] confirm_destroy guard missing"; exit 1; }
+    - grep -q 'Refusing to destroy a persistent environment' "$tpl" || { echo "[FAIL] persistent-env refusal message missing"; exit 1; }
+    # 4. Managed Identity enforced; static secret rejected
+    - grep -q 'ARM_USE_MSI' "$tpl" || { echo "[FAIL] MSI not enforced"; exit 1; }
+    - grep -q 'ARM_CLIENT_SECRET is set' "$tpl" || { echo "[FAIL] static-secret guard missing"; exit 1; }
+    # 5. Reviews a saved destroy plan, then applies it (no ad-hoc destroy)
+    - grep -q 'terraform plan -destroy' "$tpl" || { echo "[FAIL] saved destroy plan not created"; exit 1; }
+    - grep -q 'terraform apply -input=false -lock-timeout="${LOCK_TIMEOUT}" destroy.tfplan' "$tpl" || { echo "[FAIL] not applying the saved destroy plan"; exit 1; }
+    - 'echo "[PASS] terraform/destroy contract: stop event, master switch, persistent-env confirm, MSI-only, saved destroy-plan apply"'

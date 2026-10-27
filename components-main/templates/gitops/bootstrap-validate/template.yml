@@ -1,0 +1,75 @@
+spec:
+  inputs:
+    job_name:
+      description: "CI job name."
+      default: gitops-bootstrap-validate
+    stage:
+      description: "Stage this job runs in."
+      default: validate
+    agent:
+      description: "GitOps agent flavor: argocd (sync-wave) or flux (dependsOn)."
+      default: argocd
+    bootstrap_path:
+      description: "Path to the App-of-Apps / bootstrap manifests."
+      default: "clusters"
+    platform_services_path:
+      description: "Path to platform-services child apps/kustomizations."
+      default: "platform-services"
+    expected_order:
+      description: "Comma-separated expected dependency order (names must appear in this order)."
+      default: "namespaces,cert-manager,external-secrets,policy,cni-policies,ingress,observability,cost,runtime-security,app-namespaces"
+    tools_image:
+      description: "Boeing-internal image with kustomize, kubeconform, yq, python3."
+      default: "registry.web.boeing.com/ecs-catalog/docker-images/gitops-tools/v1"
+    tools_image_version:
+      description: "Pinned tag."
+      default: "1.0.0"
+---
+
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: "$[[ inputs.tools_image ]]:$[[ inputs.tools_image_version ]]"
+  variables:
+    AGENT: "$[[ inputs.agent ]]"
+    BOOTSTRAP_PATH: "$[[ inputs.bootstrap_path ]]"
+    PS_PATH: "$[[ inputs.platform_services_path ]]"
+    EXPECTED_ORDER: "$[[ inputs.expected_order ]]"
+  script:
+    - set -euo pipefail
+    # 1. Schema validation of all rendered manifests.
+    - |
+      echo "[INFO] Rendering + schema-validating kustomizations"
+      find "${PS_PATH}" -name kustomization.y*ml -printf '%h\n' | sort -u | while read -r dir; do
+        echo "  build ${dir}"
+        kustomize build "${dir}" | kubeconform -strict -summary -ignore-missing-schemas
+      done
+    # 2. Sync-wave / dependency ordering.
+    - |
+      echo "[INFO] Checking dependency order against: ${EXPECTED_ORDER}"
+      if [ "${AGENT}" = "argocd" ]; then
+        yq eval-all '[.metadata.name, (.metadata.annotations["argocd.argoproj.io/sync-wave"] // "0")] | @csv' \
+          $(find "${BOOTSTRAP_PATH}" "${PS_PATH}" -name '*.y*ml') > waves.csv || true
+        python3 - "$EXPECTED_ORDER" <<'PY'
+      import sys, csv
+      expected = sys.argv[1].split(',')
+      pos = {n:i for i,n in enumerate(expected)}
+      rows=[]
+      with open('waves.csv') as f:
+          for r in csv.reader(f):
+              if len(r)>=2 and r[0] in pos:
+                  try: rows.append((pos[r[0]], int(r[1]), r[0]))
+                  except ValueError: pass
+      rows.sort(key=lambda x:x[0])
+      last=-10**9
+      for order_idx, wave, name in rows:
+          if wave < last:
+              print(f"[ERROR] {name} wave {wave} is earlier than a prior dependency (expected non-decreasing)"); sys.exit(1)
+          last=wave
+      print("[INFO] sync-wave ordering OK")
+      PY
+      else
+        echo "[INFO] Flux: verifying dependsOn chain matches expected order"
+        # TODO(pair): implement flux dependsOn walk once AD-2 selects Flux.
+      fi
+    - echo "[INFO] bootstrap-validate passed"
+  allow_failure: false

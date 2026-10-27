@@ -1,0 +1,74 @@
+spec:
+  inputs:
+    job_name:
+      description: "CI job name."
+      default: readiness-check
+    stage:
+      description: "Stage this job runs in."
+      default: readiness
+    request_file:
+      description: "Path to the onboarding request YAML."
+      default: "onboarding.yaml"
+    app_dir:
+      description: "Application source directory to inspect."
+      default: "."
+    manifest_dir:
+      description: "Directory of Kubernetes manifests / Helm templates to inspect."
+      default: "k8s"
+    allow_exceptions:
+      description: "Comma-separated criteria IDs under an active time-bound waiver (warn not block)."
+      default: ""
+    image:
+      description: "Boeing-internal image with yq, gitleaks, grep."
+      default: "registry.web.boeing.com/ecs-catalog/docker-images/onboarding-tools/v1"
+    image_version:
+      description: "Pinned tag."
+      default: "1.0.0"
+  component:
+    - name
+---
+
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: "$[[ inputs.image ]]:$[[ inputs.image_version ]]"
+  variables:
+    REQ: "$[[ inputs.request_file ]]"
+    APP_DIR: "$[[ inputs.app_dir ]]"
+    MANIFEST_DIR: "$[[ inputs.manifest_dir ]]"
+    WAIVERS: "$[[ inputs.allow_exceptions ]]"
+  script:
+    - set -euo pipefail
+    - |
+      [ -f "${REQ}" ] || { echo "[ERROR] onboarding request ${REQ} not found" >&2; exit 1; }
+      FAIL=0
+      waived() { echo ",${WAIVERS}," | grep -q ",$1,"; }
+      check() {
+        local id="$1" ok="$2" msg="$3"
+        if [ "$ok" -eq 0 ]; then printf "  [PASS] %-6s %s\n" "$id" "$msg";
+        elif waived "$id"; then printf "  [WAIVED] %-4s %s (time-bound waiver active)\n" "$id" "$msg";
+        else printf "  [FAIL] %-6s %s\n" "$id" "$msg"; FAIL=1; fi
+      }
+      echo "[INFO] Readiness checklist for $(yq -r '.applicationId // "unknown"' "${REQ}")"
+
+      # 1 containerized / 7 non-root
+      test -f "${APP_DIR}/Dockerfile"; check C1 $? "Dockerfile present (containerized)"
+      grep -qiE '^\s*USER\s+(?!root|0)\S+' "${APP_DIR}/Dockerfile" 2>/dev/null; check C7 $? "Dockerfile sets a non-root USER"
+      # 2 no static creds
+      gitleaks detect --source "${APP_DIR}" --no-banner --redact >/dev/null 2>&1; check C2 $? "No secrets detected (Gitleaks)"
+      # 4 health probes / 5 resources
+      grep -rqiE 'livenessProbe|readinessProbe' "${MANIFEST_DIR}" 2>/dev/null; check C4 $? "Liveness/readiness probes defined"
+      grep -rqiE 'requests:|limits:' "${MANIFEST_DIR}" 2>/dev/null; check C5 $? "Resource requests/limits defined"
+      # 10 App ID + ESAT ID present
+      [ "$(yq -r '.applicationId // ""' "${REQ}")" != "" ] && [ "$(yq -r '.esatId // ""' "${REQ}")" != "" ]; check C10 $? "App ID + ESAT ID registered"
+      # 3,6,8,9 attestations in the request
+      for pair in "C3 workloadIdentityCompatible" "C6 structuredLogging" "C8 dependenciesDocumented" "C9 supportContact"; do
+        id="${pair%% *}"; key="${pair#* }"
+        [ "$(yq -r ".attestations.${key} // false" "${REQ}")" = "true" ]; check "$id" $? "Attested: ${key}"
+      done
+
+      echo "-----------------------------------------------"
+      if [ "${FAIL}" -ne 0 ]; then
+        echo "[ERROR] Readiness FAILED. See remediation guidance in docs/onboarding/readiness.md"; exit 1
+      fi
+      echo "[INFO] Readiness PASSED"
+  allow_failure: false

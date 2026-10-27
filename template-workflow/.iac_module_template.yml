@@ -1,123 +1,47 @@
-default:
-  before_script:
-    - |
-      echo "############################################### Boeing Policy of KaaS#################################################"
-      echo "# This system is company property and is provided for Boeing-authorized use only, including occasional personal use, #  
-      # as set forth in applicable written policies. Unauthorized use is prohibited and may be subject to discipline, civil suit #
-      # and criminal prosecution. As Boeing has a legitimate interest in the security of this company resource as well as its    # 
-      # efficient and lawful use, any communications or data transiting or stored on this system may be monitored, intercepted,  #
-      # recorded, and searched at any time for any lawful purpose, and may be used or disclosed for any lawful purpose. By using # 
-      # this system you understand and consent as follows: to comply with all other applicable written policies, procedures and  #
-      # guidelines for system use and protection of company information or information that the company has an obligation to     #
-      # protect, including but not limited to Proprietary Information, Personal Information/Personally Identifiable Information, # 
-      # Controlled Unclassified Information, and Export Controlled Information.                                                  #" 
-      echo "############################################### Boeing Policy of KaaS ################################################"
-      echo "====================================================================================================================="
-      echo "                                   Strata (KaaS) PLATFORM                                                            "
-      echo "====================================================================================================================="
-      echo "*********************************************************************************************************************"
-
-
-workflow: 
-  rules:
-    # TEMP TEST SCAFFOLDING (STR_230): trigger pipeline on this test branch. Revert before merge to dev.
-    - if: '$CI_COMMIT_BRANCH == "STR_230"'
-      when: always
-    - if: '$CI_COMMIT_BRANCH =~  /(\b^(sandbox)+(_[a-zA-Z0-9_]+)?\b)/ '
-      when: always    
-    - if: '$CI_COMMIT_BRANCH =~  /(\b^(dev)+(_[a-zA-Z0-9_]+)?\b)/ '
-      when: always
-    - if: '$CI_COMMIT_BRANCH =~  /(\b^(uat)+(_[a-zA-Z0-9_]+)?\b)/ '
-      when: always
-    - if: '$CI_COMMIT_BRANCH == "main" ' 
-      when: always
-    - if: $CI_COMMIT_TAG  
-      when: never
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_COMMIT_BRANCH == "main"
-      when: never
-    - when: never
-  #auto_cancel:
-  #  on_job_failure: all
-
-include:
-  # STR-230 audit record: consume the official KaaS CI/CD component (paved road), not a
-  # hand-rolled runtime. Writes the immutable 11-field WORM record after EVERY apply
-  # (success or failure) via Managed Identity. Consumes the WORM storage account by name
-  # ($AUDIT_STORAGE_ACCOUNT), which is provisioned separately (shared-services/audit).
-  - component: $CI_SERVER_FQDN/kaas/pipelines/components/compliance-gates/audit-record@0.1.2
-    inputs:
-      job_name: iac_audit_record
-      stage: iac_apply                       # placed after the apply job
-      environment: $DEPLOY_ENV               # dev|uat|prod|shared-services|...
-      module: $CI_PROJECT_NAME               # module/root the change applied to
-      apply_job: iac_apply_job               # reads apply.log + outcome
-      plan_job: iac_init_job                 # reads plan.tfplan.sha256
-      tf_root: "."                           # apply.log and plan.tfplan.sha256 live at repo root
-      audit_storage_account: $AUDIT_STORAGE_ACCOUNT
-
-  # Variables
-  - project: 'kaas/pipelines/iac_module_pipeline'
-    file: '/variables/.variables.yml'
-    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge.
-
-  # gitleaks
-  - project: 'kaas/pipelines/iac_module_pipeline'
-    file: '/scan/gitleaks/.gitleaks.yml'
-    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge.
-
-  # checkcov
-  - project: 'kaas/pipelines/iac_module_pipeline'
-    file: '/scan/checkov/.checkov.yml'
-    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge. 
-
-  # checkcov
-  - project: 'kaas/pipelines/iac_module_pipeline'
-    file: '/scan/coverity/.coverity.yml'
-    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge. 
-
-  # checkcov
-  - project: 'kaas/pipelines/iac_module_pipeline'
-    file: '/scan/terrascan/.terrascan.yml'
-    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge. 
-
-    # checkcov
-  - project: 'kaas/pipelines/iac_module_pipeline'
-    file: '/lint/tflint/.tflint.yml'
-    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge. 
-
-      # checkcov
-  - project: 'kaas/pipelines/iac_module_pipeline'
-    file: '/iac/.iac_tf_init.yml'
-    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge. 
-
-  - project: 'kaas/pipelines/iac_module_pipeline'
-    file: '/iac/.iac_tf_apply.yml'
-    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge. 
-  
-  # STR-222 approval gate: consume the official KaaS CI/CD component (paved road),
-  # not a hand-rolled job. Provides env-aware gating (sandbox/dev auto, uat >=1 approval,
-  # prod >=2 + ServiceNow CHG), fail-closed, with an audit trail.
-  - component: $CI_SERVER_FQDN/kaas/pipelines/components/compliance-gates/terraform-gate@0.1.2
-    inputs:
-      job_name: iac_gates_job
-      stage: iac_approval            # must run before iac_apply
-      environment: $DEPLOY_ENV       # sandbox|dev|uat|prod — set per run/project
-      # min_approvals_prod: "2"
-      # min_approvals_uat: "1"
-      # chg_pattern: "CHG[0-9]{7}"   # OQ-02: confirm ServiceNow format with process owner
-
-  - project: 'kaas/pipelines/iac_module_pipeline'
-    file: '/iac/.iac_tf_destroy.yml'
-    ref: STR_230   # TEMP TEST SCAFFOLDING: was 'dev'. Revert before merge. 
-
-
-stages:
- - secret_detection
- - iac_sast
- - iac_terrascan
- - iac_coverity
- - lint
- - iac_init
- - iac_approval
- - iac_apply
- - iac_destroy
+"workflow":
+  "rules":
+    -
+      "if": "$CI_COMMIT_BRANCH =~ /^(sandbox|dev|uat|main)$/ && $CI_PIPELINE_SOURCE =~ /^(push|web|schedule)$/"
+      "when": "always"
+    -
+      "when": "never"
+"include":
+  -
+    "local": "/variables/.variables.yml"
+  -
+    "local": "/scan/gitleaks/.gitleaks.yml"
+  -
+    "local": "/scan/checkov/.checkov.yml"
+  -
+    "local": "/scan/coverity/.coverity.yml"
+  -
+    "local": "/scan/terrascan/.terrascan.yml"
+  -
+    "local": "/lint/tflint/.tflint.yml"
+  -
+    "local": "/iac/.iac_tf_init.yml"
+  -
+    "local": "/iac/.iac_gates_job.yml"
+  -
+    "local": "/iac/.iac_tf_apply.yml"
+  -
+    "local": "/iac/.iac_audit_record.yml"
+  -
+    "local": "/iac/.iac_destroy_plan.yml"
+  -
+    "local": "/iac/.iac_destroy_gate.yml"
+  -
+    "local": "/iac/.iac_tf_destroy.yml"
+"stages":
+  - "secret_detection"
+  - "iac_sast"
+  - "iac_terrascan"
+  - "iac_coverity"
+  - "lint"
+  - "iac_init"
+  - "iac_approval"
+  - "iac_apply"
+  - "iac_audit"
+  - "iac_destroy_plan"
+  - "iac_destroy_approval"
+  - "iac_destroy"

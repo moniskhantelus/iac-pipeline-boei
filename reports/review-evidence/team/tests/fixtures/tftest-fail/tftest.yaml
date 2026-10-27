@@ -1,0 +1,7 @@
+version: 1
+assertions:
+  # This fixture is designed to FAIL: it requires an output the module does not declare.
+  outputs_present:
+    - fixture_id
+  resources_present:
+    - terraform_data.does_not_exist

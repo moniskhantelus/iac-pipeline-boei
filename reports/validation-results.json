@@ -1,0 +1,45 @@
+[
+  {
+    "test": "gate branch=dev environment=prod",
+    "exit": 0,
+    "stdout": "[INFO] Approval gate for environment='prod' branch_prefix='dev'\n[INFO] Auto-approved for dev\n[AUDIT] gate_decision environment=prod branch=dev approvals_found=n/a change_record=n/a outcome=APPROVED reason=\"auto-approval for dev\"\n",
+    "stderr": ""
+  },
+  {
+    "test": "gate branch=uat environment=prod",
+    "exit": 0,
+    "stdout": "[INFO] Approval gate for environment='prod' branch_prefix='uat'\n[INFO] MR !99: approvals=2\n[INFO] uat gate passed (approvals=2)\n[AUDIT] gate_decision environment=prod branch=uat approvals_found=2 change_record=n/a outcome=APPROVED reason=\"uat approvals satisfied\"\n",
+    "stderr": ""
+  },
+  {
+    "test": "gate branch=main environment=prod",
+    "exit": 0,
+    "stdout": "[INFO] Approval gate for environment='prod' branch_prefix='main'\n[INFO] MR !99: approvals=2\n[INFO] ServiceNow change record found in MR description\n[INFO] prod gate passed (approvals=2, CHG present)\n[AUDIT] gate_decision environment=prod branch=main approvals_found=2 change_record=yes outcome=APPROVED reason=\"prod approvals + change record satisfied\"\n",
+    "stderr": ""
+  },
+  {
+    "test": "query []",
+    "exit": 0,
+    "stdout": "2\n"
+  },
+  {
+    "test": "query ['--environment', 'prod']",
+    "exit": 0,
+    "stdout": "1\n"
+  },
+  {
+    "test": "query ['--outcome', 'failure']",
+    "exit": 0,
+    "stdout": "1\n"
+  },
+  {
+    "test": "query ['--module', 'network']",
+    "exit": 0,
+    "stdout": "1\n"
+  },
+  {
+    "test": "query ['--from', '2026-10-01', '--to', '2026-10-31']",
+    "exit": 0,
+    "stdout": "2\n"
+  }
+]

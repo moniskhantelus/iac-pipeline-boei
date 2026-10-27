@@ -1,0 +1,23 @@
+# Self-test: run terraform/test in plan mode (no Azure creds) against the passing fixture
+# and assert the JSON + JUnit report artifacts are produced.
+include:
+  # LOCAL include (not catalog component:@SHA) so the self-test resolves on any branch without a
+  # CI/CD Catalog release. See validate-test.yml for the rationale. (STR-299.)
+  - local: templates/terraform/test/template.yml
+    inputs:
+      job_name: test-tf-test
+      stage: test
+      tf_root: tests/fixtures/tftest-pass
+      spec_file: tftest.yaml
+      mode: plan
+
+verify-tftest-report:
+  stage: test
+  image: registry.web.boeing.com/ecs-catalog/docker-images/curl-jq/v1   # TODO(pair): pin tag
+  needs: [test-tf-test]
+  script:
+    - set -euo pipefail
+    - test -f reports/tftest-report.json
+    - jq -e . reports/tftest-report.json > /dev/null
+    - test -f reports/tftest-junit.xml
+    - echo "[PASS] terraform/test produced a valid JSON report and JUnit output"

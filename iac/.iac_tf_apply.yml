@@ -1,147 +1,438 @@
-# =============================================================================
-# GitLab CI Job: Terraform Init + Plan (Azure)
-# Purpose: Initializes the Terraform working directory for Azure infrastructure.
-#          Authenticates to Azure via Service Principal, generates the provider
-#          and backend configuration dynamically, then runs terraform init/plan.
-# =============================================================================
-
-iac_apply_job:
-  stage: iac_apply
-
-  # TERRAFORM_IMAGE and TERRAFORM_IMAGE_VERSION injected via dotenv from pre_work_job
-  image: "${TERRAFORM_IMAGE}:${TERRAFORM_IMAGE_VERSION}"
-
-  variables:
-    GIT_SSL_NO_VERIFY: "true"    # Bypass SSL verification for Git operations
-
-  script:
-    - set -eo pipefail
-
-    - echo "[INFO] Provisioning process started"
-
-    # Extract branch prefix (value before first underscore)
-    # e.g., dev_feature -> dev, uat_fix -> uat, main -> main
-    - BRANCH_PREFIX="${CI_COMMIT_BRANCH%%_*}"
-    - BRANCH_PREFIX_LOWER=${BRANCH_PREFIX,,}
-    - BRANCH_PREFIX_UPPER="${BRANCH_PREFIX^^}"
-    - echo "[INFO] BRANCH_PREFIX=${BRANCH_PREFIX} and BRANCH_PREFIX_UPPER=${BRANCH_PREFIX_UPPER}"
-
-
-    # Resolve environment-specific CI/CD variables using indirect expansion
-    # CI/CD variables must follow the naming pattern: AZ_<prefix>_<variable>
-    # e.g., AZ_dev_SP_CLIENT_ID, AZ_uat_SP_CLIENT_SECRET
-    - AZ_SUBSCRIPTION_ID="${EIC_KAAS_AZ_dev_SUBSCRIPTION_ID:-}"
-    - AZ_SP_CLIENT_ID="${AZ_dev_SP_CLIENT_ID:-}"
-    - AZ_SP_CLIENT_SECRET="${AZ_dev_SP_CLIENT_SECRET:-}"
-    - AZ_SP_TENANT_ID="${AZ_dev_TENANT_ID:-}"
+"iac_apply_job":
+  "stage": "iac_apply"
+  "image": "$CONTROL_IMAGE"
+  "tags":
+    - "kaas-control-$CONTROL_ENV"
+  "variables":
+    "GIT_SSL_NO_VERIFY": "false"
+  "rules":
+    -
+      "if": "$CONTROL_DESTROY_ENABLED == \"true\""
+      "when": "never"
+    -
+      "if": "$CI_PIPELINE_SOURCE == \"merge_request_event\""
+      "when": "never"
+    -
+      "if": "$CI_COMMIT_BRANCH == \"sandbox\" && $CI_COMMIT_REF_PROTECTED == \"true\""
+      "variables":
+        "CONTROL_ENV": "sandbox"
+      "when": "on_success"
+    -
+      "if": "$CI_COMMIT_BRANCH == \"dev\" && $CI_COMMIT_REF_PROTECTED == \"true\""
+      "variables":
+        "CONTROL_ENV": "dev"
+      "when": "on_success"
+    -
+      "if": "$CI_COMMIT_BRANCH == \"uat\" && $CI_COMMIT_REF_PROTECTED == \"true\""
+      "variables":
+        "CONTROL_ENV": "uat"
+      "when": "on_success"
+    -
+      "if": "$CI_COMMIT_BRANCH == \"main\" && $CI_COMMIT_REF_PROTECTED == \"true\""
+      "variables":
+        "CONTROL_ENV": "prod"
+      "when": "on_success"
+    -
+      "when": "never"
+  "script":
     - |
-      if [ -z "${AZ_SUBSCRIPTION_ID:-}" ] || \
-         [ -z "${AZ_SP_CLIENT_ID:-}" ] || \
-         [ -z "${AZ_SP_CLIENT_SECRET:-}" ] || \
-         [ -z "${AZ_SP_TENANT_ID:-}" ]; then
-        echo "ERROR: Required Azure authentication variable is missing"
-        exit 1
-      fi
-      echo "[INFO] Azure credentials are populated"
-      # Platform sandbox state backend (has the correct runner IP allow-list).
-      # use_azuread_auth=true (below) authenticates as the SP via AAD, avoiding ListKeys.
-      AZ_TF_BACKEND_SA_RG="kaas-tfstate-mgmt-rg"
-      AZ_TF_BACKEND_SA="kaastfssandbox00sa"
-      AZ_BACKEND_CONTAINER="tfstate"
-
-
-      # The AZ_* variables above hold credential VALUES directly (not names), so reference
-      # them directly (no indirect ${!...} expansion). Cloud comes from AZ_LOGIN_CSP_TYPE.
-      export ARM_ENVIRONMENT="${AZ_LOGIN_CSP_TYPE}"
-      export ARM_SUBSCRIPTION_ID="${AZ_SUBSCRIPTION_ID}"
-      export ARM_CLIENT_ID="${AZ_SP_CLIENT_ID}"
-      export ARM_CLIENT_SECRET="${AZ_SP_CLIENT_SECRET}"
-      export ARM_TENANT_ID="${AZ_SP_TENANT_ID}"
-
-
-    # Authenticate to Azure using the environment-specific Service Principal
-    # AZ_LOGIN_CSP_TYPE is defined in .variables.yml (e.g., AzureUSGovernment)
-    - echo "[INFO] Authenticating to Azure via Service Principal..."
-    - az cloud set --name "${ARM_ENVIRONMENT}"
-    - az login --service-principal -u "${AZ_SP_CLIENT_ID}" -p "${AZ_SP_CLIENT_SECRET}" -t "${AZ_SP_TENANT_ID}"
-    - echo "[INFO] Azure authentication successful"
-    - az account set --subscription "${AZ_SUBSCRIPTION_ID}"
-    - echo "[INFO] Azure authentication successful"
-
-    # Dynamically generate the Terraform provider and backend configuration
-    # Single terraform{} block containing both required_providers and backend
-    # AZ_TF_BACKEND_RG and AZ_TF_BACKEND_SA must be set as GitLab CI/CD variables
-
-    - ls -la
-
-    # Show Terraform version for audit purposes
-    - terraform version
-    # Delete the local plugin cache
-    - rm -rf .terraform/
-    # Delete the lock file safely
-    - rm -f .terraform.lock.hcl
-
-    - |
-      mkdir -p "$HOME/.terraform.d/plugin-cache"
-      cat > "$HOME/.terraformrc" <<'EOF'
-      plugin_cache_dir   = "$HOME/.terraform.d/plugin-cache"
-      disable_checkpoint = true
-      provider_installation {
-       direct {
-        exclude = ["registry.terraform.io/*/*"]
-       }
-       network_mirror {
-        url = "https://sres.web.boeing.com/artifactory/api/terraform/ecs-hashicorp-remote-releases/providers/"
-       }
-      }
-      EOF
-      export TF_CLI_CONFIG_FILE="$HOME/.terraformrc"
-
-    # Initialize Terraform (downloads providers, configures backend)
-    #- terraform init
-    #- /tmp/scripts/install_tf_providers.sh $SRES_USERNAME $SRES_TOKEN "azurerm" "5.2.0" 
-    - |
-      #cd examples/basic-deployment
-      echo "[TEST: Example Base] Executing the terraform example folder Started  "
-      echo "Executing the terraform test folder list providers "
-      #terraform -chdir=examples/basic-deployment providers
-      echo "Executing the terraform test folder init "
-
-    - |
-      cat > $CI_PROJECT_DIR/examples/basic/backend.hcl <<EOF
-      resource_group_name  = "${AZ_TF_BACKEND_SA_RG}"
-      storage_account_name = "${AZ_TF_BACKEND_SA}"
-      container_name       = "${AZ_BACKEND_CONTAINER}"
-      environment          = "usgovernment"
-      use_azuread_auth     = true
-      key                  = "terraform/$CI_PROJECT_NAME/$CI_COMMIT_BRANCH/$CI_PROJECT_NAME-$CI_COMMIT_BRANCH.tfstate"  
-      EOF  
-
-    - |
-      terraform -chdir=examples/basic init -backend-config=$CI_PROJECT_DIR/examples/basic/backend.hcl
-      echo "[TEST: Example Base] Executing the terraform example folder "
-    # Run the apply and capture its console output to apply.log. The audit-record component
-    # (STR-230) reads apply.log to derive the outcome, and runs with when:always so a FAILED
-    # apply is still recorded. tee + PIPESTATUS preserves the real terraform exit code.
-    - |
-      set +e
-      terraform -chdir=examples/basic apply -input=false -auto-approve tfplan 2>&1 \
-        | tee "${CI_PROJECT_DIR}/apply.log"
-      APPLY_RC=${PIPESTATUS[0]}
-      set -e
-      echo "[INFO] terraform apply exit code: ${APPLY_RC}"
-    - cat $CI_PROJECT_DIR/examples/basic/backend.hcl
-    - ls -la
-    - exit "${APPLY_RC:-0}"
-  dependencies:
-    - iac_init_job
-  artifacts:
-    # apply.log is consumed by the audit-record component (compliance-gates/audit-record),
-    # which writes the immutable audit record for STR-230. when:always so failed applies
-    # are captured and recorded.
-    when: always
-    expire_in: 90 days
-    paths:
-      - apply.log
-      - reports/terraform/terraform-apply-output.txt
-  allow_failure: false
+      python3 - apply --operation apply <<'PY_CONTROL'
+      #!/usr/bin/env python3
+      """Shared, stdlib-only change control. Generated into CI components; do not fork inline copies."""
+      import argparse
+      import datetime as dt
+      import hashlib
+      import json
+      import os
+      from pathlib import Path
+      import re
+      import subprocess
+      import sys
+      import tempfile
+      import time
+      import urllib.error
+      import urllib.parse
+      import urllib.request
+      import uuid
+      
+      class Blocked(Exception):
+          pass
+      
+      class NoRedirect(urllib.request.HTTPRedirectHandler):
+          def redirect_request(self, req, fp, code, msg, headers, newurl):
+              raise Blocked('GitLab API redirects are prohibited; refusing to forward credentials')
+      
+      _AZURE_PROFILE = None
+      
+      def require(ok, message):
+          if not ok:
+              raise Blocked(message)
+      
+      def now():
+          return dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+      
+      def read(path):
+          return json.loads(Path(path).read_text())
+      
+      def write(path, obj):
+          path = Path(path)
+          path.parent.mkdir(parents=True, exist_ok=True)
+          temp = path.with_suffix(path.suffix + '.tmp')
+          temp.write_text(json.dumps(obj, indent=2) + '\n')
+          temp.replace(path)
+      
+      def sha(path):
+          with open(path, 'rb') as stream:
+              digest = hashlib.sha256()
+              for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                  digest.update(chunk)
+              return digest.hexdigest()
+      
+      def config():
+          require(os.environ.get('CI_COMMIT_REF_PROTECTED') == 'true', 'Deployment ref must be protected')
+          require(os.environ.get('CI_PIPELINE_SOURCE') in ('push', 'web', 'schedule'), 'Unsupported deployment pipeline source')
+          require(re.search(r'@sha256:[0-9a-f]{64}$', os.environ.get('CI_JOB_IMAGE', '')) is not None, 'CONTROL_IMAGE must be pinned by digest')
+          cfg = read(os.environ['CONTROL_CONFIG_FILE'])
+          branch = os.environ['CI_COMMIT_BRANCH']
+          mappings = [(env, value) for env, value in cfg['environments'].items() if branch in value['branches']]
+          require(len(mappings) == 1, 'Branch must map to exactly one trusted environment')
+          env, target = mappings[0]
+          require(env in ('sandbox', 'dev', 'uat', 'prod'), 'Unknown environment')
+          require(os.environ.get('CONTROL_ENV') == env, 'Component environment conflicts with trusted target mapping')
+          require(cfg['project_id'] == os.environ['CI_PROJECT_ID'], 'Policy belongs to another project')
+          require(cfg['api_url'] == os.environ['CI_API_V4_URL'] and cfg['api_url'].startswith('https://'), 'Unexpected GitLab API URL')
+          for key in ('root', 'module', 'subscription_id', 'identity_client_id', 'plan_identity_client_id', 'backend_resource_group', 'state_account', 'state_container', 'state_key'):
+              require(isinstance(target.get(key), str) and target[key] and 'REPLACE' not in target[key], 'Missing trusted target setting: ' + key)
+          require(target['plan_identity_client_id'] != target['identity_client_id'], 'Planning and applying require different identities')
+          root = (Path(os.environ['CI_PROJECT_DIR']) / target['root']).resolve()
+          require(root.is_relative_to(Path(os.environ['CI_PROJECT_DIR']).resolve()), 'Terraform root must remain inside checkout')
+          require(root.is_dir(), 'Terraform root does not exist')
+          require(cfg['audit']['account'].lower() not in {v['state_account'].lower() for v in cfg['environments'].values()}, 'Audit storage must be separate from every state account')
+          require(re.fullmatch('[a-z0-9]{3,24}', cfg['audit']['account']) is not None, 'Invalid audit account')
+          require(cfg['schema_contract'] == 'provisional-v1' and cfg['schema_approved'] is True, 'S010 owner must approve the provisional field mapping before deployment')
+          require(cfg['change_pattern_confirmed'] is True, 'ServiceNow number format requires process-owner confirmation')
+          require(re.fullmatch(r'[A-Za-z0-9._-]+', target['module']) is not None, 'Module must be a safe path segment')
+          target = dict(target, environment=env, root=str(root))
+          return cfg, target
+      
+      def api(cfg, suffix):
+          token = os.environ.get('GITLAB_APPROVAL_TOKEN', '')
+          require(bool(token), 'GITLAB_APPROVAL_TOKEN (read_api) is required; JOB-TOKEN is not used')
+          url = cfg['api_url'] + '/projects/' + urllib.parse.quote(cfg['project_id'], safe='') + suffix
+          for attempt in range(3):
+              request = urllib.request.Request(url, headers={'PRIVATE-TOKEN': token})
+              try:
+                  with urllib.request.build_opener(NoRedirect()).open(request, timeout=20) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as exc:
+                  if exc.code not in (429, 500, 502, 503, 504) or attempt == 2:
+                      raise Blocked('GitLab verification failed: HTTP ' + str(exc.code)) from None
+              except (urllib.error.URLError, TimeoutError, ValueError):
+                  if attempt == 2:
+                      raise Blocked('GitLab verification unavailable or invalid JSON') from None
+              time.sleep(2 ** attempt)
+      
+      def pages(cfg, suffix):
+          result = []
+          for page in range(1, 1001):
+              batch = api(cfg, suffix + ('&' if '?' in suffix else '?') + 'per_page=100&page=' + str(page))
+              require(isinstance(batch, list), 'Expected paginated JSON array')
+              result.extend(batch)
+              if len(batch) < 100:
+                  return result
+          raise Blocked('Pagination safety limit reached; refusing incomplete evidence')
+      
+      def approval(cfg, target):
+          """Only merged promotion commits are supported. Direct/FF/ambiguous commits fail closed."""
+          env = target['environment']
+          decision = dict(environment=env, approvals_found=None, change_record=None, outcome='BLOCKED', timestamp=now())
+          try:
+              if env in ('sandbox', 'dev'):
+                  decision.update(approvals_found=0, change_record=False, outcome='APPROVED', reason='automatic lower-environment approval', mr_ref='n/a')
+                  return decision
+              settings = api(cfg, '/approvals')
+              require(isinstance(settings, dict) and settings.get('reset_approvals_on_push') is True
+                      and settings.get('merge_requests_author_approval') is False
+                      and settings.get('merge_requests_disable_committers_approval') is True
+                      and settings.get('disable_overriding_approvers_per_merge_request') is True,
+                      'Project must reset approvals on push, forbid author/committer approval and protect approval rules')
+              commit = os.environ['CI_COMMIT_SHA']
+              candidates = pages(cfg, '/repository/commits/' + urllib.parse.quote(commit, safe='') + '/merge_requests')
+              matching = [m for m in candidates if isinstance(m, dict) and m.get('state') == 'merged'
+                          and str(m.get('target_project_id')) == cfg['project_id']
+                          and m.get('target_branch') == os.environ['CI_COMMIT_BRANCH']
+                          and commit in (m.get('merge_commit_sha'), m.get('squash_commit_sha'))]
+              require(len(matching) == 1, 'Need exactly one merged promotion MR bound to deployed commit/target')
+              iid = matching[0]['iid']
+              require(type(iid) is int and iid > 0, 'Invalid MR identity')
+              mr = api(cfg, '/merge_requests/' + str(iid))
+              require(isinstance(mr, dict) and mr.get('state') == 'merged' and mr.get('target_branch') == os.environ['CI_COMMIT_BRANCH']
+                      and str(mr.get('target_project_id')) == cfg['project_id']
+                      and commit in (mr.get('merge_commit_sha'), mr.get('squash_commit_sha')), 'MR changed or commit binding invalid')
+              author = mr.get('author', {}).get('id')
+              require(type(author) is int, 'Missing MR author')
+              response = api(cfg, '/merge_requests/' + str(iid) + '/approvals')
+              require(isinstance(response, dict) and isinstance(response.get('approved_by'), list), 'Invalid approved_by schema')
+              eligible = set(target['eligible_approver_ids'])
+              require(all(type(i) is int and i > 0 for i in eligible), 'Invalid eligible approver policy')
+              reviewers = set()
+              for entry in response['approved_by']:
+                  require(isinstance(entry, dict) and isinstance(entry.get('user'), dict), 'Malformed approval entry')
+                  user = entry['user']
+                  require(type(user.get('id')) is int, 'Malformed reviewer ID')
+                  if user['id'] in eligible and user['id'] != author and user.get('state') == 'active' and user.get('bot') is not True:
+                      reviewers.add(user['id'])
+              needed = 2 if env == 'prod' else 1
+              desc = mr.get('description')
+              require(desc is None or isinstance(desc, str), 'Invalid MR description')
+              # Fixed format with whole-token boundaries. Change only after process-owner confirmation.
+              chg = bool(re.search(r'(?<![A-Za-z0-9_])CHG[0-9]{7}(?![A-Za-z0-9_])', desc or ''))
+              decision.update(approvals_found=len(reviewers), required=needed, change_record=chg, mr_ref=str(iid), reviewer_ids=sorted(reviewers))
+              failures = []
+              if len(reviewers) < needed:
+                  failures.append('found %s independent eligible approvals; require %s' % (len(reviewers), needed))
+              if env == 'prod' and not chg:
+                  failures.append('valid ServiceNow CHG number absent from MR description')
+              require(not failures, '; '.join(failures))
+              decision.update(outcome='APPROVED', reason='environment requirements satisfied')
+              return decision
+          except Exception as exc:
+              decision['reason'] = str(exc)
+              raise
+          finally:
+              print('[AUDIT] ' + json.dumps(decision, sort_keys=True), flush=True)
+              write('control-evidence/gate-decision.json', decision)
+      
+      def run(args, log=None, cwd=None, check=True):
+          if log:
+              with open(log, 'a') as stream:
+                  stream.write('$ ' + ' '.join(args) + '\n'); stream.flush()
+                  process = subprocess.Popen(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                  for line in process.stdout:
+                      stream.write(line); stream.flush(); print(line, end='', flush=True)
+                  code = process.wait()
+              if check:
+                  require(code == 0, 'Command failed (%s); see %s' % (code, log))
+              return code
+          process = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+          if check:
+              # Avoid printing command output that may contain credentials/tokens.
+              require(process.returncode == 0, 'Command failed: ' + ' '.join(args[:4]))
+          return process
+      
+      def login(cfg, target):
+          global _AZURE_PROFILE
+          require(not any(os.environ.get(k) for k in ('ARM_CLIENT_SECRET', 'AZURE_CLIENT_SECRET', 'ARM_ACCESS_KEY', 'AZURE_STORAGE_KEY', 'AZURE_STORAGE_CONNECTION_STRING', 'AZURE_STORAGE_SAS_TOKEN')), 'Static cloud credentials prohibited')
+          if _AZURE_PROFILE is not None:
+              _AZURE_PROFILE.cleanup()
+          _AZURE_PROFILE = tempfile.TemporaryDirectory(prefix='control-azure-')
+          os.environ['AZURE_CONFIG_DIR'] = _AZURE_PROFILE.name
+          os.environ['ARM_USE_MSI'] = 'true'
+          os.environ['ARM_USE_AZUREAD'] = 'true'
+          os.environ['ARM_USE_CLI'] = 'false'
+          os.environ['ARM_USE_OIDC'] = 'false'
+          os.environ['ARM_CLIENT_ID'] = target['identity_client_id']
+          os.environ['ARM_SUBSCRIPTION_ID'] = target['subscription_id']
+          os.environ['ARM_ENVIRONMENT'] = cfg['arm_environment']
+          run(['az', 'cloud', 'set', '--name', cfg['azure_cloud']])
+          run(['az', 'login', '--identity', '--client-id', target['identity_client_id'], '--output', 'none'])
+          run(['az', 'account', 'set', '--subscription', target['subscription_id']])
+          account = json.loads(run(['az', 'account', 'show', '-o', 'json']).stdout)
+          require(account['id'].lower() == target['subscription_id'].lower(), 'Wrong Azure subscription')
+      
+      def storage_check(cfg, target):
+          audit = cfg['audit']
+          result = run(['az', 'storage', 'container', 'immutability-policy', 'show', '--subscription', audit['subscription_id'],
+                        '--resource-group', audit['resource_group'], '--account-name', audit['account'], '--container-name', audit['container'], '-o', 'json'])
+          data = json.loads(result.stdout)
+          props = data.get('properties', data)
+          require(props.get('immutabilityPeriodSinceCreationInDays') == 730, 'Audit retention must be 730 days')
+          locked = props.get('state') == 'Locked'
+          # Draft is allowed only in an explicitly configured lower-environment acceptance run.
+          require(locked or (target['environment'] in ('dev', 'sandbox') and audit.get('allow_draft_lower_env') is True
+                             and props.get('state') == 'Unlocked'), 'Audit policy must be legally approved and Locked')
+      
+      def upload(cfg, filename, blob):
+          audit = cfg['audit']
+          for attempt in range(3):
+              result = run(['az', 'storage', 'blob', 'upload', '--account-name', audit['account'], '--container-name', audit['container'],
+                            '--name', blob, '--file', str(filename), '--auth-mode', 'login', '--type', 'block', '--overwrite', 'false',
+                            '--if-none-match', '*', '--no-progress', '--only-show-errors', '-o', 'none'], check=False)
+              if result.returncode == 0:
+                  return
+              # A lost success response must not turn retry into overwrite. Compare existing bytes.
+              with tempfile.TemporaryDirectory() as temp:
+                  existing = Path(temp) / 'existing.json'
+                  downloaded = run(['az', 'storage', 'blob', 'download', '--account-name', audit['account'],
+                      '--container-name', audit['container'], '--name', blob, '--file', str(existing),
+                      '--auth-mode', 'login', '--no-progress', '--only-show-errors', '-o', 'none'], check=False)
+                  if downloaded.returncode == 0 and sha(existing) == sha(filename):
+                      return
+              if attempt < 2:
+                  time.sleep(2 ** attempt)
+          raise Blocked('Immutable write failed; retain local evidence and reconcile before any retry of infrastructure')
+      
+      def paths():
+          base = Path('control-evidence'); base.mkdir(exist_ok=True)
+          return base
+      
+      def metadata(cfg, target, plan, operation):
+          return dict(commit_sha=os.environ['CI_COMMIT_SHA'], pipeline_id=os.environ['CI_PIPELINE_ID'], project_id=cfg['project_id'],
+                      plan_job_id=os.environ['CI_JOB_ID'], actor=os.environ['GITLAB_USER_LOGIN'], environment=target['environment'],
+                      module=target['module'], subscription_id=target['subscription_id'], state_account=target['state_account'],
+                      state_key=target['state_key'], root=str(Path(target['root']).relative_to(Path(os.environ['CI_PROJECT_DIR']).resolve())),
+                      operation=operation, plan_hash=sha(plan), config_hash=sha(os.environ['CONTROL_CONFIG_FILE']), timestamp=now())
+      
+      def plan_command(cfg, target, operation):
+          base = paths(); log = base / 'plan.log'; log.touch()
+          require(not os.environ.get('GITLAB_APPROVAL_TOKEN'), 'Plan jobs must not receive the approval API credential; scope it to deployment environments')
+          plan_target = dict(target, identity_client_id=target['plan_identity_client_id'])
+          login(cfg, plan_target)
+          init(cfg, plan_target, log)
+          plan = (base / 'plan.tfplan').resolve()
+          cmd = ['terraform', 'plan', '-input=false', '-no-color', '-lock-timeout=300s', '-out=' + str(plan)]
+          if operation == 'destroy':
+              cmd.append('-destroy')
+          if target.get('var_file'):
+              cmd.append('-var-file=' + target['var_file'])
+          run(cmd, log, target['root'])
+          with open(base / 'plan.txt', 'w') as stream:
+              result = subprocess.run(['terraform', 'show', '-no-color', str(plan)], cwd=target['root'], stdout=stream, stderr=subprocess.PIPE)
+              require(result.returncode == 0, 'Could not render saved plan')
+          write(base / 'plan-manifest.json', metadata(cfg, target, plan, operation))
+      
+      def init(cfg, target, log):
+          cmd = ['terraform', 'init', '-input=false', '-lockfile=readonly', '-reconfigure']
+          for key, value in [('resource_group_name', target['backend_resource_group']), ('storage_account_name', target['state_account']),
+                             ('container_name', target['state_container']), ('key', target['state_key']), ('use_azuread_auth', 'true'),
+                             ('use_msi', 'true'), ('subscription_id', target['subscription_id']),
+                             ('environment', cfg['arm_environment'])]:
+              cmd.append('-backend-config=' + key + '=' + value)
+          # Identity is supplied only by ARM_CLIENT_ID at execution time. Saved plans embed
+          # backend config, so persisting the read-only plan client ID would break apply auth.
+          run(cmd, log, target['root'])
+      
+      def bound_plan(cfg, target, operation):
+          plan = paths() / 'plan.tfplan'
+          manifest = read(paths() / 'plan-manifest.json')
+          expected = metadata(cfg, target, plan, operation)
+          for key in ('commit_sha', 'pipeline_id', 'project_id', 'environment', 'module', 'subscription_id', 'state_account', 'state_key', 'root', 'operation', 'plan_hash', 'config_hash'):
+              require(manifest.get(key) == expected[key], 'Plan binding mismatch: ' + key)
+          require(isinstance(manifest.get('actor'), str) and manifest['actor'], 'Missing pipeline trigger actor')
+          return manifest
+      
+      FIELDS = {'actor', 'commit_sha', 'plan_hash', 'timestamp', 'environment', 'module', 'outcome', 'pipeline_id', 'job_id', 'project_path', 'mr_ref'}
+      def validate_record(record):
+          require(set(record) == FIELDS, 'Audit field names do not match provisional-v1')
+          require(all(isinstance(v, str) and v for v in record.values()), 'Audit fields must be nonempty strings')
+          require(re.fullmatch('[0-9a-f]{40,64}', record['commit_sha']) is not None, 'Invalid commit SHA')
+          require(re.fullmatch('[0-9a-f]{64}', record['plan_hash']) is not None, 'Invalid plan hash')
+          require(record['outcome'] in ('success', 'failure', 'unknown'), 'Invalid outcome')
+          require(record['environment'] in ('dev', 'sandbox', 'uat', 'prod'), 'Invalid audit environment')
+          dt.datetime.strptime(record['timestamp'], '%Y-%m-%dT%H:%M:%SZ')
+      
+      def apply_command(cfg, target, operation):
+          base = paths(); log = base / 'apply.log'; log.touch()
+          manifest = bound_plan(cfg, target, operation)
+          evidence = read(base / 'gate-decision.json')
+          require(evidence.get('outcome') == 'APPROVED' and evidence.get('plan_hash') == manifest['plan_hash']
+                  and evidence.get('pipeline_id') == os.environ['CI_PIPELINE_ID'] and evidence.get('operation') == operation
+                  and evidence.get('commit_sha') == os.environ['CI_COMMIT_SHA'], 'Missing or mismatched manual gate evidence')
+          decision = approval(cfg, target)  # Fresh verification immediately before mutation.
+          login(cfg, target)
+          storage_check(cfg, target)
+          attempt = os.environ['CI_JOB_ID'] + '-' + uuid.uuid4().hex
+          prefix = '/'.join([target['environment'], target['module'], now()[:10].replace('-', '/'), os.environ['CI_PROJECT_ID'], os.environ['CI_PIPELINE_ID'], attempt])
+          intent = dict(kind='intent', attempt=attempt, operation=operation, apply_job_id=os.environ['CI_JOB_ID'],
+                        execution_actor=os.environ['GITLAB_USER_LOGIN'], plan=manifest, gate=decision, timestamp=now(), blob_prefix=prefix)
+          write(base / 'intent.json', intent)
+          upload(cfg, base / 'intent.json', prefix + '/intent.json')  # Durable intent before init/apply.
+          rc = 1; error = None
+          try:
+              init(cfg, target, log)
+              bound_plan(cfg, target, operation)  # Rehash after initialization.
+              rc = run(['terraform', 'apply', '-input=false', '-no-color', '-lock-timeout=300s', str((base / 'plan.tfplan').resolve())], log, target['root'], check=False)
+          except Exception as exc:
+              error = str(exc)
+              with open(log, 'a') as stream:
+                  stream.write('CONTROL ERROR: ' + error + '\n')
+          finally:
+              record = dict(actor=manifest['actor'], commit_sha=os.environ['CI_COMMIT_SHA'], plan_hash=manifest['plan_hash'], timestamp=now(),
+                            environment=target['environment'], module=target['module'], outcome='success' if rc == 0 else 'failure',
+                            pipeline_id=os.environ['CI_PIPELINE_ID'], job_id=os.environ['CI_JOB_ID'], project_path=os.environ['CI_PROJECT_PATH'], mr_ref=decision['mr_ref'])
+              validate_record(record)
+              write(base / 'audit.json', record)
+              write(base / 'result.json', dict(kind='result', attempt=attempt, exit_code=rc, error=error, operation=operation,
+                    execution_actor=os.environ['GITLAB_USER_LOGIN'], apply_log_hash=sha(log), record=record, blob_prefix=prefix))
+              # result is the canonical terminal envelope; audit.json is the queryable S010 mapping.
+              upload(cfg, base / 'result.json', prefix + '/result.json')
+              upload(cfg, base / 'audit.json', prefix + '/audit.json')
+          return rc
+      
+      def main():
+          parser = argparse.ArgumentParser()
+          parser.add_argument('command', choices=['plan', 'gate', 'apply', 'deliver'])
+          parser.add_argument('--operation', choices=['apply', 'destroy'], default='apply')
+          args = parser.parse_args()
+          paths()
+          try:
+              cfg, target = config()
+              if args.operation == 'destroy':
+                  require(os.environ.get('CONTROL_DESTROY_ENABLED') == 'true', 'Destroy is disabled')
+              if args.command == 'deliver':
+                  result_path = paths() / 'result.json'
+                  if not result_path.exists():
+                      print('No terminal artifact: apply did not run or was interrupted; inspect durable intents with reconcile.py')
+                      return 0
+                  result = read(result_path)
+                  validate_record(result['record'])
+                  require(result['record']['pipeline_id'] == os.environ['CI_PIPELINE_ID']
+                          and result['record']['commit_sha'] == os.environ['CI_COMMIT_SHA']
+                          and result['record']['environment'] == target['environment'], 'Result belongs to another deployment')
+                  login(cfg, target)
+                  storage_check(cfg, target)
+                  upload(cfg, result_path, result['blob_prefix'] + '/result.json')
+                  audit_path = paths() / 'audit.json'
+                  require(read(audit_path) == result['record'], 'Audit and result records differ')
+                  upload(cfg, audit_path, result['blob_prefix'] + '/audit.json')
+              elif args.command == 'plan':
+                  plan_command(cfg, target, args.operation)
+              elif args.command == 'gate':
+                  manifest = bound_plan(cfg, target, args.operation)
+                  decision = approval(cfg, target)
+                  decision.update(plan_hash=manifest['plan_hash'], commit_sha=os.environ['CI_COMMIT_SHA'], pipeline_id=os.environ['CI_PIPELINE_ID'], operation=args.operation)
+                  write(paths() / 'gate-decision.json', decision)
+              else:
+                  return apply_command(cfg, target, args.operation)
+              return 0
+          except Exception as exc:
+              write(paths() / 'control-error.json', dict(outcome='BLOCKED', command=args.command, environment=os.environ.get('CONTROL_ENV'),
+                    approvals_found=None, change_record=None, reason=str(exc), timestamp=now()))
+              print('[AUDIT] ' + json.dumps(read(paths() / 'control-error.json'), sort_keys=True), file=sys.stderr)
+              return 1
+          finally:
+              if _AZURE_PROFILE is not None:
+                  _AZURE_PROFILE.cleanup()
+      
+      if __name__ == '__main__':
+          sys.exit(main())
+      
+      PY_CONTROL
+  "artifacts":
+    "paths":
+      - "control-evidence/"
+    "when": "always"
+    "expire_in": "90 days"
+    "access": "developer"
+  "allow_failure": false
+  "needs":
+    -
+      "job": "iac_init_job"
+      "artifacts": true
+    -
+      "job": "iac_gates_job"
+      "artifacts": true
+  "environment":
+    "name": "$CONTROL_ENV"
+    "action": "start"
+  "resource_group": "terraform-$CONTROL_ENV"

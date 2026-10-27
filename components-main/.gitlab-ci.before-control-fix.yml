@@ -1,0 +1,290 @@
+# =============================================================================
+# components project pipeline: lint our own source (shared components),
+# self-test every component (include from current SHA), release on tag.
+#
+# Every `- local:` below is a self-test fragment that EXISTS in this repo and
+# includes its component at $CI_COMMIT_SHA, so the revision under test is exactly
+# this commit. A `local:` pointing at a missing file is a hard config error, so
+# the list is kept in lockstep with tests/.
+# =============================================================================
+
+# TEMP (debug): `test` and `lint` stages disabled while debugging runner image-pull access.
+# `lint` is empty now that shellcheck-fallback is commented out. Restore by re-adding `test`
+# and `lint` here and uncommenting the self-test includes, shellcheck-fallback, and
+# policy-eval-tfplan-tests below.
+# stages: [secret_detection, lint, test, release]
+# TEMP (debug): `test` re-enabled for the supply-chain/build-image self-test only; `lint` stays
+# disabled (shellcheck-fallback still commented out). Other self-tests remain commented below.
+stages: [secret_detection, test, release]
+
+# -----------------------------------------------------------------------------
+# TEMP (runner routing): the PROD k8s runner (`gitlabrunner-prod`) is not usable right now (setup
+# incomplete / Secrets-quota — STR-221, handled by the platform team elsewhere). Jobs here are
+# UNTAGGED, so without a default tag they would sit pending or land on the broken prod runner.
+#
+# While prod is tended to, route the WHOLE pipeline to a healthy online dev/sandbox runner by
+# tagging every job via `default: tags:`. We target the dind dev runner
+# (`#44142 ...cdp-kaas-dev...dind-executor`, tags include `kaas-dev` + `dind`): tag matching is
+# AND, so `[kaas-dev, dind]` lands on a dev runner that also provides docker-in-docker (needed by
+# supply-chain/build-image; harmless for the shell+grep contract tests and the terraform jobs).
+#
+# TO REVERT once prod is healthy: delete this `default:` block (jobs become untagged again) or
+# change the tags to the prod runner's tags.
+#
+# UPDATE (runner DNS outage): the tagged dind runners (dev #44142 OFFLINE; sandbox #44028) were
+# failing the built-in repo checkout with `fatal: ... Could not resolve host: git.web.boeing.com`
+# — a DNS/network failure on those runner devices, which happens BEFORE any job script and cannot
+# be fixed from job YAML. The only healthy runners (OCP instance runners #15568/#15554/#15507/
+# #15499, "last contact: just now") are reached by leaving jobs UNTAGGED. The `default: tags:`
+# block is therefore disabled so GitLab can schedule on any available healthy runner.
+# NOTE: untagged jobs will NOT get docker-in-docker. All currently-ENABLED self-tests are hermetic
+# (shell + grep contract asserts; the injected build/apply/etc jobs are dormant `when: manual`), so
+# none of them need dind. Re-tag via this block only if a job that performs a real container build
+# (live `supply-chain/build-image`) is enabled and a healthy dind runner with working DNS exists.
+# -----------------------------------------------------------------------------
+# default:
+#   tags:
+#     # - kaas-dev
+#     - dind
+#     - kaas
+
+# Centralized override point for the self-test assertion image. Every enabled self-test uses
+# `image: "${ASSERT_IMAGE}"` with its own fallback default; setting it here makes the whole
+# pipeline use one image the dev runner can pull. Left at the amp terraform image already in use
+# (same registry.web.boeing.com ecosystem the dev runner should reach). If a specific job cannot
+# pull it, override ASSERT_IMAGE on that job or as a project CI/CD variable. [STR-214]
+variables:
+  ASSERT_IMAGE: "registry.web.boeing.com/amp/docker-images/terraform/terraform-azure/ubi8minimal-azterraform/v1.9.2:26.04.15"
+
+include:
+  # ---- Secret scanning (CI) ----
+  # TEMP: the shared company component `components/secret-detection/secret-detection@1` is
+  # currently BROKEN on our runner — it runs the `gitleaks` image whose ENTRYPOINT is `gitleaks`,
+  # so GitLab's injected shell collides with it and the job dies with:
+  #     Error: unknown command "sh" for "gitleaks"
+  # Since the shared component cannot be patched from here, secret scanning is provided by a
+  # hand-rolled `secret_detection` job defined below (see that job for details). Re-adopt the
+  # shared component once it is fixed to not override the image entrypoint. [STR-226]
+  #
+  # ---- Release (shared company component) [STR-221] ----
+  # Creates the GitLab release on a semver tag. Pinned (not ~latest) so an upstream change can't
+  # silently break releases. Rules overridden by the `create-release` block at the bottom.
+  # extract_release_notes stays false until CHANGELOG.md carries a "## [x.y.z]" heading for every
+  # tag — with it true, a tag missing from the changelog FAILS the release job.
+  - component: $CI_SERVER_FQDN/components/gitlab/release@0.6.1
+    inputs:
+      stage: release
+      job_name: create-release
+      extract_release_notes: false
+
+  # ---- Other shared company components (consume, don't rebuild) ----
+  # Commented pending catalog slug/version confirmation. An unresolvable
+  # `include: component:` fails the whole pipeline at config time, so they are left
+  # commented until confirmed. Shell lint is covered meanwhile by `shellcheck-fallback`.
+  # TODO(pair): confirm slug + semantic version, then uncomment and remove the fallback.
+  # - component: $CI_SERVER_FQDN/components/shellcheck@<version>
+  # - component: $CI_SERVER_FQDN/components/markdownlint@<version>
+  # - component: $CI_SERVER_FQDN/components/renovate@<version>
+
+  # ---- Self-test fragments: each includes its component from $CI_COMMIT_SHA ----
+  # TEMP (debug): ALL self-test includes disabled while debugging image pulls / the rest of the
+  # pipeline. These all run in the `test` stage. Uncomment this block (and re-add `test` to
+  # stages:) to restore the component self-tests.
+  # terraform
+  # Executing self-tests (run real terraform fmt/init/validate/plan, call the jobs API). These need
+  # a healthy runner to actually execute; the component jobs use the pullable amp terraform image and
+  # the verify jobs use ASSERT_IMAGE (also amp). Validated LOCALLY against terraform 1.9.2 + the
+  # fixtures (valid fixture passes; bad-fmt fixture fails fmt; local-backend plan yields tfplan +
+  # valid JSON). Run on the server to confirm the live jobs — STR-221 access tech debt.
+  - local: tests/terraform/validate-test.yml       # runs terraform fmt/init/validate — ENABLED (validated locally)
+  - local: tests/terraform/plan-test.yml           # runs terraform plan (local backend) — ENABLED (validated locally)
+  # - local: tests/terraform/test-test.yml         # still disabled — enable after validate/plan confirmed green on the server
+  # Contract self-tests (hermetic: grep the template, injected job dormant — no terraform executed).
+  # Validated locally (parse + strict script-string + assertions pass vs current templates).
+  - local: tests/terraform/apply-test.yml          # contract test (no live apply) — ENABLED
+  - local: tests/terraform/destroy-test.yml        # contract test (no live destroy) [STR-299] — ENABLED
+  - local: tests/terraform/drift-test.yml          # contract test (no live drift) [STR-229] — ENABLED
+  # compliance-gates
+  - local: tests/compliance-gates/terraform-gate-test.yml # contract test (hermetic: shell+grep asserts, injected gate dormant) — RE-ENABLED (STR-222)
+  - local: tests/compliance-gates/audit-record-test.yml   # contract test (hermetic: shell+grep + query-tool run, injected job dormant) — ENABLED (STR-230)
+  # - local: tests/compliance-gates/policy-gate-test.yml
+  # security
+  # - local: tests/security/checkov-test.yml
+  # - local: tests/security/policy-eval-test.yml
+  # supply-chain
+  - local: tests/supply-chain/build-image-test.yml # contract test (no live build) — RE-ENABLED (STR-214)
+  # finops
+  - local: tests/finops/infracost-test.yml # contract test (hermetic: shell+grep asserts, injected job default-skip) — ENABLED (STR-225)
+  # gitops
+  # - local: tests/gitops/manifest-update-test.yml   # contract test (no live push)
+  # onboarding
+  # - local: tests/onboarding/readiness-check-test.yml
+
+# -----------------------------------------------------------------------------
+# Pipeline triggering (new `components` repo, 0.x dev stage).
+# This repo auto-runs a pipeline on branch pushes, MRs, tags, scheduled runs, and manual
+# "Run pipeline". The branch-push rule (`$CI_COMMIT_BRANCH`) is what kick-starts CI for ongoing
+# dev work in this repo.
+#
+# HISTORY: the former POC repo (`kaas/pipelines/strata-components`) intentionally OMITTED the
+# `$CI_COMMIT_BRANCH` rule to avoid dispatching jobs to the saturated `gitlabrunner-prod` runner
+# (Secrets quota 125/125 — STR-221). With no matching workflow rule, GitLab created no pipeline on
+# push, which is why pushes appeared to "do nothing". That suppression was POC-specific and is
+# lifted here so dev pushes run automatically.
+#
+# If this repo's runner is still quota-constrained and branch pushes start failing at
+# "Preparing environment: exceeded quota ... secrets", comment out the `$CI_COMMIT_BRANCH` rule
+# again and trigger via Pipelines → Run pipeline (the `web` rule) until the platform team confirms
+# headroom.
+# -----------------------------------------------------------------------------
+workflow:
+  rules:
+    - if: '$CI_COMMIT_TAG'                                 # releases always allowed
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'  # MRs allowed
+    - if: '$CI_PIPELINE_SOURCE == "web"'                  # manual "Run pipeline" allowed
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'             # scheduled (e.g. drift) allowed
+    - if: '$CI_COMMIT_BRANCH'                             # branch pushes auto-run (kick-starts dev CI)
+
+# -----------------------------------------------------------------------------
+# Secret scanning (CI) — hand-rolled gitleaks gate. [STR-226]
+# TEMP replacement for the shared `secret-detection@1` component, which is broken on our runner
+# (it runs the gitleaks image with GitLab's injected `sh`, but the image ENTRYPOINT is `gitleaks`,
+# producing `Error: unknown command "sh" for "gitleaks"`).
+#
+# Fix here: `entrypoint: [""]` clears the image ENTRYPOINT so GitLab's shell runs our `script:`
+# normally and we invoke `gitleaks` ourselves. We scan the working directory with the repo-local
+# .gitleaks.toml (default rules + Azure/Terraform rules: client_secret, ARM_CLIENT_SECRET, storage
+# keys). This is a BLOCKING security gate: gitleaks exits non-zero on any finding, failing the job
+# (no allow_failure). Re-adopt the shared component once it no longer overrides the entrypoint.
+# -----------------------------------------------------------------------------
+secret_detection:
+  stage: secret_detection
+  image:
+    name: registry.web.boeing.com/containers/linux/gitleaks:v8.21.0
+    entrypoint: [""]
+  script:
+    - gitleaks version
+    # `gitleaks dir` scans the checked-out source tree. --redact keeps secret values out of logs;
+    # a non-zero exit on findings fails this job and blocks the pipeline (the intended gate).
+    - gitleaks dir . --config .gitleaks.toml --no-banner --redact --verbose
+
+# NOTE: templates/terraform/drift now HAS a contract self-test (tests/terraform/drift-test.yml,
+# STR-229), listed with the other terraform self-tests above. It stays COMMENTED with its siblings
+# only because the whole `test` stage + self-test block is temporarily disabled during the runner
+# image-pull debug; re-enable it together with the rest (and the `test` entry in stages:).
+# (terraform/destroy also has a contract self-test, wired above — STR-299.)
+
+# Fallback lint for shell while the shared components/shellcheck slug is unconfirmed.
+# TEMP (debug): disabled — its image registry.web.boeing.com/ecs-catalog/docker-images/shellcheck/v0:latest
+# cannot be pulled by the PROD runner ("requested access to the resource is denied"), and the failure
+# occurs during "Preparing environment" (pod ImagePullBackOff), which allow_failure does NOT rescue.
+# A shared component `components/shellcheck/check@0.0.1` exists as the eventual replacement, but it
+# likely pulls an ecs-catalog image with the same entitlement gap, so it is NOT wired in yet.
+# Restore (or replace with the shared component) once the runner can pull ecs-catalog images.
+# shellcheck-fallback:
+#   stage: lint
+#   image: registry.web.boeing.com/ecs-catalog/docker-images/shellcheck/v0:latest  # TODO(pair): pin
+#   rules:
+#     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+#     - if: '$CI_COMMIT_BRANCH'
+#   script:
+#     - echo "[INFO] Linting embedded shell in component templates"
+#     - |
+#       # Extracting script blocks from YAML is non-trivial; as a light check, lint any *.sh helpers.
+#       if ls tests/**/*.sh >/dev/null 2>&1; then shellcheck tests/**/*.sh; else echo "no .sh helpers"; fi
+#   allow_failure: true
+
+# NOTE (STR-226): CI secret scanning is provided by the shared
+# components/secret-detection/secret-detection@1 component wired in the include: block
+# above (passing --config .gitleaks.toml so the Azure/Terraform rules apply). The former
+# interim hand-rolled gitleaks job was removed in favor of the shared component, per
+# COMPANY-COMPONENTS.md ("no reason to maintain our own"). The pre-commit hook
+# (.pre-commit-config.yaml) remains the local first line of defense.
+
+# -----------------------------------------------------------------------------
+# STR-228: unit-test the seven Terraform governance policies in security/policy-eval.
+# Runs the engine against the shipped tfplan policy set + fixtures and asserts every
+# rule fires on the fail fixture and the pass fixture is clean (no false positives).
+# BLOCKING, so a regression in any of the seven policies fails the pipeline.
+# -----------------------------------------------------------------------------
+# TEMP (debug): disabled with the rest of the `test` stage. Restore alongside the self-test
+# includes above and the `test` entry in stages:.
+# policy-eval-tfplan-tests:
+#   stage: test
+#   image: registry.web.boeing.com/ecs-catalog/docker-images/python/v3.12:1.0.0   # TODO(pair): confirm tag
+#   rules:
+#     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+#     - if: '$CI_COMMIT_BRANCH'
+#   script:
+#     - python3 --version
+#     - python3 -c "import yaml" 2>/dev/null || pip install --quiet pyyaml
+#     - echo "[INFO][STR-228] Running the 7 Terraform governance policy unit tests"
+#     - python3 tests/security/policy_eval_tfplan_test.py
+#   allow_failure: false
+
+# -----------------------------------------------------------------------------
+# One-off manual cleanup utility (developer-run, STR-221 testing aid).
+# Purges THIS project's leftover CI artifacts from PREVIOUS failed/old pipelines via the GitLab
+# API — not the k8s runner Secrets (those live in the gitlabrunner-prod namespace and need
+# cluster/kubectl access this job does not have; that cleanup is a platform task, see
+# jira-comments/str-221). This reclaims GitLab-side storage left by failed deployment runs so a
+# developer can keep iterating on the branch without accumulating stale artifacts.
+#
+# Manual-only (never auto-runs). Uses CLEANUP_TOKEN (a masked/protected PAT with api scope, set as
+# a CI/CD variable) rather than CI_JOB_TOKEN, because artifact deletion needs api scope. If
+# CLEANUP_TOKEN is absent the job explains what to set and exits 0 (no-op) so it is safe to click.
+# -----------------------------------------------------------------------------
+cleanup-stale-artifacts:
+  stage: test
+  image: registry.web.boeing.com/ecs-catalog/docker-images/curl-jq/v1:latest   # TODO(pair): pin
+  rules:
+    - when: manual
+      allow_failure: true
+  variables:
+    KEEP_RECENT: "5"   # keep the N most-recent pipelines' artifacts; purge older ones
+  script:
+    - set -euo pipefail
+    - |
+      if [ -z "${CLEANUP_TOKEN:-}" ]; then
+        echo "[INFO] CLEANUP_TOKEN not set — this is a no-op."
+        echo "[INFO] To use: add a masked/protected CI/CD variable CLEANUP_TOKEN (PAT, api scope),"
+        echo "[INFO] then re-run this manual job. It purges artifacts from older pipelines on this project."
+        exit 0
+      fi
+    - |
+      API="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}"
+      echo "[INFO] Listing pipelines for ${CI_PROJECT_PATH} (keeping ${KEEP_RECENT} most recent)..."
+      # Pipelines newest-first; skip the KEEP_RECENT newest, delete artifacts for the rest.
+      IDS=$(curl --silent --fail --header "PRIVATE-TOKEN: ${CLEANUP_TOKEN}" \
+        "${API}/pipelines?order_by=id&sort=desc&per_page=100" \
+        | jq -r ".[${KEEP_RECENT}:][].id") || { echo "[ERROR] could not list pipelines (token scope?)"; exit 1; }
+      if [ -z "${IDS}" ]; then echo "[INFO] Nothing to purge."; exit 0; fi
+      for pid in ${IDS}; do
+        echo "[INFO] Deleting artifacts for pipeline ${pid}..."
+        curl --silent --fail --request DELETE --header "PRIVATE-TOKEN: ${CLEANUP_TOKEN}" \
+          "${API}/pipelines/${pid}/artifacts" \
+          && echo "  [OK] ${pid}" || echo "  [WARN] could not delete artifacts for ${pid} (may already be expired)"
+      done
+      echo "[INFO] Artifact cleanup complete."
+
+# -----------------------------------------------------------------------------
+# Release [STR-221]: the `create-release` job comes from the shared company component
+# components/gitlab/release (see include: above). This block only overrides its rules.
+#
+# The component's default rule makes the job MANUAL on ANY tag. We keep our original behaviour:
+# auto-run, and only for a semantic-version tag (replaces the old `$CI_COMMIT_TAG -> when: never`
+# anti-pattern that blocked all publishing).
+#
+# History of the hand-rolled job this replaces:
+#   1. ecs-catalog/.../glab-cli/v1:latest  -> pull denied (ecs-catalog entitlement gap).
+#   2. amp/.../ubi8minimal-azterraform     -> "release-cli: command not found" (no release tooling).
+#   3. sres.web.boeing.com:5050/gitlab/glab -> pull denied to anonymous; fixed with SRES
+#      DOCKER_AUTH_CONFIG (pipeline #12616640), but the tag pipeline (#12616830, job 52097541) then
+#      failed at step_release: "x509: certificate signed by unknown authority" calling the
+#      git.web.boeing.com API — the public glab image does not trust the Boeing CA.
+#   4. components/gitlab/release (Boeing-built glab image, Boeing CA trusted, no SRES creds).
+#      Proven by components/gitlab's own 0.6.1 release (job 48956714) on the same OCP runner fleet.
+# -----------------------------------------------------------------------------
+create-release:
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+$/'

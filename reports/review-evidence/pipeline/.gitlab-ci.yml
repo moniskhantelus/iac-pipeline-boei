@@ -1,0 +1,19 @@
+# =============================================================================
+# TEMP TEST SCAFFOLDING (STR_230) — DO NOT MERGE TO dev.
+# This root .gitlab-ci.yml exists only so THIS template-library repo runs its
+# own pipeline on a push to STR_230 (GitLab auto-runs only a root .gitlab-ci.yml).
+# It includes the template locally; the template's own include refs are flipped
+# to ref: STR_230 by the other scaffolding commit, so all job files are pulled
+# from this branch.
+#
+# Note: the iac_init/iac_apply jobs operate on examples/basic, which this
+# template repo does NOT contain — those stages will fail here. This Option-A
+# self-test validates pipeline triggering, YAML wiring, and the scan/lint
+# stages. For a true plan/apply capture test, include this template from a
+# consumer project that provides examples/basic (Option B).
+#
+# Remove this file before merging STR_230 -> dev.
+# =============================================================================
+
+include:
+  - local: '/template-workflow/.iac_module_template.yml'

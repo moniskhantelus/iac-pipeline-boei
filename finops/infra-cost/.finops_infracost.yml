@@ -16,7 +16,7 @@ iac_infracost_job:
   image: ${INFRACOST_IMAGE}:${INFRACOST_IMAGE_VERSION}
 
   variables:
-    GIT_SSL_NO_VERIFY: "true"
+    GIT_SSL_NO_VERIFY: "false"
     # INFRACOST_API_KEY: Required for Infracost Cloud features (optional for CLI)
     # Set as masked/protected variable in GitLab CI/CD settings
     INFRACOST_API_KEY: "${INFRACOST_API_KEY}"

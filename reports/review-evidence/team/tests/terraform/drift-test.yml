@@ -1,0 +1,57 @@
+# Self-test: terraform/drift runs `terraform plan -detailed-exitcode` against a LIVE Azure backend
+# on a schedule and alerts on drift (exit 2). A real drift check needs Managed Identity + remote
+# state, so it CANNOT run hermetically in CI. This is therefore an INJECTION + CONFIGURATION
+# contract test: it proves the component injects a schedule-only drift job with the required
+# controls, without contacting Azure. (STR-229 / GAP-003.)
+#
+# What is asserted (static, against the published template at this revision):
+#   1. Schedule-only: the job runs only when CI_PIPELINE_SOURCE == "schedule" (never on branches/MRs).
+#   2. Managed Identity enforced; a static ARM_CLIENT_SECRET is rejected.
+#   3. Drift is DETECTED, not corrected: `terraform plan -detailed-exitcode` (never apply).
+#   4. On drift (exit 2) it writes drift-report.txt and posts the ops alert webhook.
+#   5. drift-report.txt is exported as a (when: always) artifact.
+include:
+  # LOCAL include (not catalog component:@SHA) so the self-test resolves on any branch without a
+  # CI/CD Catalog release. See validate-test.yml / destroy-test.yml for the rationale. (STR-299.)
+  - local: templates/terraform/drift/template.yml
+    inputs:
+      job_name: test-tf-drift-contract
+      stage: test
+      environment: test
+      tf_root: tests/fixtures/terraform-local
+
+# The injected drift job must never run during the self-test (it would need Azure creds and a live
+# backend, and it is schedule-only anyway). Keep it dormant: manual + allow_failure so the pipeline
+# still passes regardless of the schedule rule.
+test-tf-drift-contract:
+  rules:
+    - when: manual
+      allow_failure: true
+
+assert-drift-contract:
+  stage: test
+  # Any image the runner can pull with a shell + grep works. Override via ASSERT_IMAGE if needed
+  # (see build-image-test.yml for the ecs-catalog image-pull entitlement caveat, STR-214).
+  image: "${ASSERT_IMAGE}"
+  variables:
+    ASSERT_IMAGE: "registry.web.boeing.com/amp/docker-images/terraform/terraform-azure/ubi8minimal-azterraform/v1.9.2:26.04.15"
+  script:
+    - set -euo pipefail
+    - tpl=templates/terraform/drift/template.yml
+    # 1. Schedule-only trigger
+    - grep -q 'CI_PIPELINE_SOURCE == "schedule"' "$tpl" || { echo "[FAIL] drift not restricted to schedule trigger"; exit 1; }
+    - grep -Eq '^\s*-\s*when:\s*never\s*$' "$tpl" || { echo "[FAIL] missing default when:never (job would run off-schedule)"; exit 1; }
+    # 2. Managed Identity enforced; static secret rejected
+    - grep -q 'ARM_USE_MSI' "$tpl" || { echo "[FAIL] MSI not enforced"; exit 1; }
+    - grep -q 'az login --identity' "$tpl" || { echo "[FAIL] MSI login missing"; exit 1; }
+    - grep -q 'ARM_CLIENT_SECRET is set' "$tpl" || { echo "[FAIL] static-secret guard missing"; exit 1; }
+    # 3. Detect, never correct
+    - grep -q 'terraform plan -detailed-exitcode' "$tpl" || { echo "[FAIL] detailed-exitcode drift plan missing"; exit 1; }
+    - 'if grep -Eq ''terraform apply'' "$tpl"; then echo "[FAIL] drift must never apply"; exit 1; fi'
+    # 4. On drift (exit 2): write report + post alert webhook
+    - grep -q 'drift-report.txt' "$tpl" || { echo "[FAIL] drift report not written"; exit 1; }
+    - grep -q 'inputs.alert_webhook' "$tpl" || { echo "[FAIL] alert webhook not posted"; exit 1; }
+    - 'grep -Eq ''2\)'' "$tpl" || { echo "[FAIL] exit-code-2 (drift) branch missing"; exit 1; }'
+    # 5. Report exported as artifact (when: always)
+    - grep -Eq 'when:\s*always' "$tpl" || { echo "[FAIL] drift report artifact not retained"; exit 1; }
+    - 'echo "[PASS] terraform/drift contract: schedule-only, MSI-only, detailed-exitcode detect, alert-on-drift, report artifact"'

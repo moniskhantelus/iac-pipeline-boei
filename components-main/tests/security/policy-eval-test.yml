@@ -1,0 +1,33 @@
+# Self-test: policy-eval must PASS the compliant fixtures for both targets, using the
+# built-in policy set shipped with this component revision (no external policy repo needed).
+#   - kubernetes target  -> tests/fixtures/policy-eval/k8s-pass
+#   - tfplan target      -> tests/fixtures/policy-eval/tfplan-pass.json
+include:
+  # LOCAL include (not catalog component:@SHA) so the self-test resolves on any branch without a
+  # CI/CD Catalog release. See terraform/validate-test.yml for the rationale. (STR-299.)
+  - local: templates/security/policy-eval/template.yml
+    inputs:
+      job_name: test-policy-eval-k8s
+      stage: test
+      target: kubernetes
+      manifest_dir: tests/fixtures/policy-eval/k8s-pass
+      use_builtin_policies: "true"
+  - local: templates/security/policy-eval/template.yml
+    inputs:
+      job_name: test-policy-eval-tfplan
+      stage: test
+      target: tfplan
+      tfplan_json: tests/fixtures/policy-eval/tfplan-pass.json
+      use_builtin_policies: "true"
+
+verify-policy-eval-reports:
+  stage: test
+  image: registry.web.boeing.com/ecs-catalog/docker-images/curl-jq/v1   # TODO(pair): pin tag
+  needs: [test-policy-eval-k8s, test-policy-eval-tfplan]
+  script:
+    - set -euo pipefail
+    # Both evaluations must have emitted a parseable report. Each job carries its own
+    # artifact, so confirm the schema on at least one and that the file is valid JSON.
+    - test -f reports/policy-eval-report.json
+    - jq -e '.results != null or .summary != null' reports/policy-eval-report.json > /dev/null
+    - echo "[PASS] policy-eval produced a valid report for the compliant fixtures"

@@ -1,0 +1,112 @@
+spec:
+  inputs:
+    job_name:
+      description: "CI job name. Allows the component to be included more than once."
+      default: tf-plan
+    stage:
+      description: "Stage this job runs in."
+      default: plan
+    environment:
+      description: "Target environment (dev|uat|prod|test). Scopes state key + var file."
+      # required — no default
+    tf_root:
+      description: "Path to the Terraform root to plan, relative to the repo root."
+      default: "."
+    backend:
+      description: "Backend type: azurerm (real remote state) or local (self-test only)."
+      default: azurerm
+    var_file:
+      description: "Optional tfvars file passed to plan, relative to tf_root. Empty = none."
+      default: ""
+    cache_key:
+      description: "Terraform plugin-cache key. MUST NOT contain '/' (GitLab forbids it in cache:key). A static default is used because GitLab does NOT interpolate $[[ inputs.* ]] inside an input's default value — a nested reference like 'tfplan-$[[ inputs.environment ]]' would be passed to the runner VERBATIM and break the cache step. Consumers SHOULD override per environment (e.g. cache_key: tfplan-dev), especially when one environment has multiple tf_roots."
+      default: "tfplan-default"
+    terraform_image:
+      description: "Boeing-internal Terraform image."
+      default: "registry.web.boeing.com/amp/docker-images/terraform/terraform-azure/ubi8minimal-azterraform/v1.9.2"
+    terraform_image_version:
+      description: "Tag of the Terraform image."
+      default: "26.04.15"
+    arm_environment:
+      description: "Azure cloud for the azurerm provider (AzureUSGovernment for Gov)."
+      default: "AzureUSGovernment"
+  component:
+    - name
+    - version
+---
+
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: "$[[ inputs.terraform_image ]]:$[[ inputs.terraform_image_version ]]"
+  environment:
+    name: $[[ inputs.environment ]]
+    action: prepare
+  variables:
+    # STR-299 (Rec 5 — harden credentials / control toolchain): disabling Git TLS verification is a
+    # man-in-the-middle risk and was flagged for removal. The Boeing-internal Terraform image already
+    # trusts the corporate CA, so clone/fetch over HTTPS verifies normally. Do NOT re-enable the
+    # bypass; if a specific internal host is untrusted, install its CA cert rather than turning
+    # verification off globally.
+    # GIT_SSL_NO_VERIFY: "true"   # REMOVED (STR-299 Rec 5) — do not reinstate
+    GIT_SSL_NO_VERIFY: "false"
+    TF_ROOT: "$[[ inputs.tf_root ]]"
+    TF_ENV: "$[[ inputs.environment ]]"
+    TF_BACKEND: "$[[ inputs.backend ]]"
+    TF_VAR_FILE: "$[[ inputs.var_file ]]"
+  cache:
+    # GitLab forbids "/" in cache:key. tf_root can contain "/" (e.g. examples/complete), so the key
+    # is driven by the slash-free `cache_key` input (defaults to the environment) rather than tf_root.
+    # The cached PATH still includes tf_root — "/" is only disallowed in the key, not in paths.
+    key: "$[[ inputs.cache_key ]]"
+    paths:
+      - "$[[ inputs.tf_root ]]/.terraform"
+  script:
+    - set -euo pipefail
+    - |
+      if [ -n "${ARM_CLIENT_SECRET:-}" ]; then
+        echo "[ERROR] ARM_CLIENT_SECRET is set. Static credentials are prohibited. Use Managed Identity." >&2
+        exit 1
+      fi
+    - cd "${TF_ROOT}"
+    - terraform version
+    - |
+      if [ "${TF_BACKEND}" = "local" ]; then
+        echo "[INFO] Local backend (self-test). No Azure auth required."
+        terraform init -reconfigure -backend=false
+      else
+        echo "[INFO] Managed Identity auth (ARM_USE_MSI=true, env=$[[ inputs.arm_environment ]])"
+        export ARM_USE_MSI="true"
+        export ARM_ENVIRONMENT="$[[ inputs.arm_environment ]]"
+        az cloud set --name "${ARM_ENVIRONMENT}"
+        az login --identity --output none
+        az account show --query '{subscription:name, id:id}' -o json
+        # backend.<env>.hcl is committed in the consumer repo; only the key is overridden here.
+        terraform init -reconfigure -backend-config="backend.${TF_ENV}.hcl"
+      fi
+    - |
+      if [ -n "${TF_VAR_FILE}" ]; then
+        terraform plan -input=false -out=plan.tfplan -var-file="${TF_VAR_FILE}" 2>&1 | tee plan.log
+      else
+        terraform plan -input=false -out=plan.tfplan 2>&1 | tee plan.log
+      fi
+      PLAN_RC=${PIPESTATUS[0]}
+      [ "${PLAN_RC}" -eq 0 ] || { echo "[ERROR] terraform plan failed (exit ${PLAN_RC}) — see plan.log" | tee -a plan.log; exit "${PLAN_RC}"; }
+    - terraform show -json plan.tfplan > plan.tfplan.json
+    - jq -e . plan.tfplan.json > /dev/null
+    # STR-230: human-readable plan output (no-color) alongside the machine JSON, for the audit trail.
+    - terraform show -no-color plan.tfplan > plan.txt
+    - sha256sum plan.tfplan > plan.tfplan.sha256
+    - 'echo "[INFO] Plan artifacts: plan.tfplan, plan.tfplan.json, plan.tfplan.sha256, plan.txt, plan.log"'
+  artifacts:
+    # STR-230 (artifact capture): plan.log (raw run output) + plan.txt (human-readable diff) are now
+    # reliably written and retained for operational use; retention raised to 90 days to match apply.
+    name: "plan-$[[ inputs.environment ]]-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - "$[[ inputs.tf_root ]]/plan.tfplan"
+      - "$[[ inputs.tf_root ]]/plan.tfplan.json"
+      - "$[[ inputs.tf_root ]]/plan.tfplan.sha256"
+      - "$[[ inputs.tf_root ]]/plan.txt"
+      - "$[[ inputs.tf_root ]]/plan.log"
+    expire_in: 90 days
+    when: always
+  allow_failure: false

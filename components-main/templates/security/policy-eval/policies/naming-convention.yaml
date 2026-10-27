@@ -1,0 +1,26 @@
+# STR-228 POLICY-3: Resource names must follow the platform naming convention (kaas-*).
+apiVersion: kaas.boeing/policy-eval/v1
+kind: Policy
+metadata:
+  name: naming-convention
+spec:
+  mode: Enforce
+  target: tfplan
+  rules:
+    - name: name-kaas-prefix
+      match:
+        resource_types:
+          - azurerm_resource_group
+          - azurerm_kubernetes_cluster
+          - azurerm_storage_account
+          - azurerm_key_vault
+      validate:
+        message: "Resource name must follow the platform naming convention (start with 'kaas')."
+        deny:
+          conditions:
+            # Deny when the name is present but does NOT start with 'kaas'.
+            - key: name
+              operator: Exists
+            - key: name
+              operator: NotStartsWith
+              value: "kaas"

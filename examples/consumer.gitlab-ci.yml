@@ -1,0 +1,7 @@
+# Publish the corrected pipeline repo, then pin its reviewed commit.
+include:
+  - project: kaas/pipelines/iac_module_pipeline
+    ref: REPLACE_WITH_REVIEWED_40_CHARACTER_COMMIT_SHA
+    file: /template-workflow/.iac_module_template.yml
+# Protected settings: CONTROL_IMAGE, CONTROL_CONFIG_FILE (file), GITLAB_APPROVAL_TOKEN.
+# Preserve existing Terraform root/backend/state mapping when filling the policy.

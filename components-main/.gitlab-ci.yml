@@ -1,0 +1,12 @@
+stages: [test]
+control-tests:
+  stage: test
+  image: "$CONTROL_IMAGE"
+  script:
+    - python3 -m unittest discover -s tests/control -v > test-results.txt 2>&1 || { cat test-results.txt; exit 1; }
+    - cat test-results.txt
+    - python3 tools/build_templates.py --check
+  artifacts:
+    paths: [test-results.txt]
+    when: always
+    expire_in: 90 days

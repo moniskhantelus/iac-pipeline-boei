@@ -1,0 +1,18 @@
+# Violates: unapproved registry + mutable tag, no resources, no securityContext, no probes.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bad-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bad-api
+  template:
+    metadata:
+      labels:
+        app: bad-api
+    spec:
+      containers:
+        - name: api
+          image: docker.io/library/nginx:latest

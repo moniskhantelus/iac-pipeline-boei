@@ -1,0 +1,22 @@
+# STR-228 POLICY-4: AKS clusters must not expose a public API server endpoint.
+apiVersion: kaas.boeing/policy-eval/v1
+kind: Policy
+metadata:
+  name: no-public-aks
+spec:
+  mode: Enforce
+  target: tfplan
+  rules:
+    - name: aks-private-api-server
+      match:
+        resource_types:
+          - azurerm_kubernetes_cluster
+      validate:
+        message: "AKS clusters must set private_cluster_enabled = true (no public API server)."
+        deny:
+          conditions:
+            # private_cluster_enabled defaults to false when absent -> treat missing as public.
+            - key: private_cluster_enabled
+              operator: Equals
+              value: false
+              default: false

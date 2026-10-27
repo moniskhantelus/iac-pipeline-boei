@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gp-api
+  labels:
+    team: alpha
+    application-id: p1234
+    esat-id: e5678
+    cost-center: cc99
+    environment: dev
+    tier: "2"
+    support-group: sg-alpha
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gp-api
+  template:
+    metadata:
+      labels:
+        app: gp-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: kaasappacr.azurecr.us/alpha/gp-api@sha256:deadbeef
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]

@@ -1,0 +1,49 @@
+# =============================================================================
+# GitLab CI Job: Sensitive Authentication Data (SAD) Detection
+# Purpose: Scans the source code for exposed secrets, credentials, and tokens
+#          using gitleaks before code is merged or deployed.
+# Reference: 
+# =============================================================================
+secret_detection_sad_job:
+  # Stage in the CI pipeline where this job runs
+  stage: secret_detection
+
+  # Docker image used for running gitleaks
+  # Variables sadscan_image and sadscan_version should be defined in CI/CD settings
+  image: ${SADSCAN_IMAGE}:${SADSCAN_IMAGE_VERSION}
+
+  # Rules determine when this job is triggered
+  # The job runs on ALL branches and merge requests to ensure secrets are never committed
+  rules:
+    - when: always    # Execute on every pipeline regardless of branch or event
+
+  # Artifacts are files preserved after the job completes
+  # The JSON report is saved regardless of pass/fail so results can be reviewed
+  artifacts:
+    paths:
+      - gitleaks-report.json    # Scan results in JSON format
+    when: always                # Save artifact even if the job fails
+
+  # Job execution steps
+  script:
+    - echo "=============== Sensitive Authentication Data (SAD) ================================"
+    - echo "Info>> PreScan Event Trigger Please wait for SAD check ....."
+    - echo "Info>> Docker image ${sadscan_image}:${sadscan_version}"
+    - echo "List of files and directory of parent folder"
+    - pwd
+    - ls
+    - echo "Triggered the gitleaks scan for SAD ........"
+    # Check if SAD scan should be skipped via CI/CD variable
+    # Set SAD_SCAN_SKIP=Y in CI/CD variables to bypass (not recommended)
+    - |
+      if [[ "${SAD_SCAN_SKIP}" == "Y" ]]; then
+        echo "Skipping the SAD scan - this is not good practice"
+      else
+        # Run gitleaks against the project directory
+        # -v: verbose output showing detected secrets
+        # --report-format json: output results as JSON
+        # --report-path: save report to file for artifact collection
+        gitleaks detect --source="${CI_PROJECT_DIR}" -v --redact --report-format json --report-path gitleaks-report.json
+        echo "Scan completed"
+      fi
+  allow_failure: false

@@ -1,0 +1,91 @@
+# =============================================================================
+# Component: terraform/validate
+# -----------------------------------------------------------------------------
+# Project : kaas/pipelines (components CI/CD Component project)
+# Story   : STR-215 - terraform/validate GitLab CI Component
+# Epic    : Infrastructure Pipeline (IaC Automation and GitOps Provisioning)
+# Purpose : Runs `terraform fmt -check`, `terraform init -backend=false`, and
+#           `terraform validate` as a single reusable, versioned job with
+#           explicit, validated inputs. Runs with NO backend credentials so it
+#           can execute on any merge request without state access. Full backend
+#           initialization happens later, in the plan stage.
+#
+# Pipeline position: validate -> plan -> policy gate -> apply -> notify
+#
+# Usage:
+#   include:
+#     - component: $CI_SERVER_FQDN/kaas/pipelines/components/terraform/validate@0.1.0
+#       inputs:
+#         job_name: tf-validate
+#         tf_root: terraform/
+#
+# Design notes (STR-215):
+#   - All six inputs declare a description and a default.
+#   - job_name is interpolated into the (quoted) job key so the component can be
+#     included more than once with distinct names and produce distinct jobs.
+#   - No default:, workflow:, stages:, or top-level variables: blocks appear here
+#     (component best practice -- avoid global keywords leaking into consumers).
+# =============================================================================
+
+spec:
+  inputs:
+    job_name:
+      description: "CI job name. Include more than once with distinct names to produce distinct jobs."
+      default: tf-validate
+    stage:
+      description: "Pipeline stage this job runs in."
+      default: validate
+    tf_root:
+      description: "Path to the Terraform root to validate, relative to the repo root."
+      default: "."
+    fail_on_fmt:
+      description: "Fail the job on formatting violations (terraform fmt -check). Set 'false' for non-blocking."
+      default: "true"
+    terraform_image:
+      description: "Boeing-internal Terraform CLI image (no public pulls)."
+      default: "registry.web.boeing.com/amp/docker-images/terraform/terraform-azure/ubi8minimal-azterraform/v1.9.2"
+    terraform_version:
+      description: "Tag of the Terraform image. Consumers should override to pin their own version; the default is provided for the initial release only."
+      default: "26.04.15"
+  component:
+    - name
+    - version
+---
+
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: "$[[ inputs.terraform_image ]]:$[[ inputs.terraform_version ]]"
+  variables:
+    # STR-299 (Rec 5 — harden credentials / control toolchain): disabling Git TLS verification is a
+    # man-in-the-middle risk and was flagged for removal. The Boeing-internal Terraform image already
+    # trusts the corporate CA, so clone/fetch over HTTPS verifies normally. Do NOT re-enable the
+    # bypass; if a specific internal host is untrusted, install its CA cert rather than turning
+    # verification off globally.
+    # GIT_SSL_NO_VERIFY: "true"   # REMOVED (STR-299 Rec 5) — do not reinstate
+    GIT_SSL_NO_VERIFY: "false"
+    TF_ROOT: "$[[ inputs.tf_root ]]"
+    FAIL_ON_FMT: "$[[ inputs.fail_on_fmt ]]"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH'
+      when: on_success
+  script:
+    - set -euo pipefail
+    - cd "${TF_ROOT}"
+    - terraform version
+    - |
+      echo "[INFO] terraform fmt -check (recursive)"
+      if [ "${FAIL_ON_FMT}" = "true" ]; then
+        terraform fmt -check -recursive -diff
+      else
+        terraform fmt -check -recursive -diff || echo "[WARN] formatting issues found (non-blocking)"
+      fi
+    # No backend, no credentials -- pure configuration validation.
+    # Full backend init happens later in the plan stage.
+    - terraform init -backend=false
+    - terraform validate
+    # NOTE: component name/version interpolation removed — it is only valid for catalog
+    # component includes and errors under the local includes used by the self-tests (STR-299).
+    - echo "[INFO] validate OK ($CI_PROJECT_PATH@$CI_COMMIT_SHORT_SHA)"
+  allow_failure: false

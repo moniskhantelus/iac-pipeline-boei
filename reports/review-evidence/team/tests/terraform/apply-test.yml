@@ -1,0 +1,68 @@
+# Self-test: terraform/apply performs a real Azure apply (Managed Identity + remote backend),
+# so it CANNOT be executed hermetically in CI without credentials and live state. This test is
+# therefore an INJECTION + CONFIGURATION contract test: it proves the component injects a job
+# with the required safety properties, without running an apply.
+#
+# What is asserted (static, against the published template at this revision):
+#   1. The job declares  environment: { name, action: start }  (GitLab environment event fires).
+#   2. The job enforces Managed Identity and REJECTS a static ARM_CLIENT_SECRET.
+#   3. The job applies a SAVED plan (no -auto-approve, no re-plan) and verifies its sha256.
+#   4. The job wires  needs: [<plan_job>]  so it consumes the reviewed plan artifact.
+#
+# NOTE: we intentionally do NOT include the component with runnable inputs here, because its
+# `rules:` would schedule a real apply on protected branches. We assert the template contract.
+include:
+  # LOCAL include (not catalog component:@SHA) so the self-test resolves on any branch without a
+  # CI/CD Catalog release. See validate-test.yml for the rationale. (STR-299.)
+  - local: templates/terraform/apply/template.yml
+    inputs:
+      job_name: test-tf-apply-contract
+      stage: test
+      environment: test
+      tf_root: tests/fixtures/terraform-local
+      plan_job: noop-plan
+
+# A no-op stand-in for the plan job the apply component expects in `needs:`.
+# Produces the artifact names the apply job looks for so config resolves cleanly.
+noop-plan:
+  stage: test
+  # Use a runner-pullable image (the PROD runner cannot pull ecs-catalog images; see STR-214).
+  image: "${ASSERT_IMAGE}"
+  variables:
+    ASSERT_IMAGE: "registry.web.boeing.com/amp/docker-images/terraform/terraform-azure/ubi8minimal-azterraform/v1.9.2:26.04.15"
+  script:
+    - echo "[INFO] no-op plan stand-in for apply contract test"
+  artifacts:
+    paths: []
+
+# The injected apply job must never run during the self-test (it would need Azure creds).
+# Override it to be manual + allow_failure so it stays dormant and the pipeline still passes.
+test-tf-apply-contract:
+  rules:
+    - when: manual
+      allow_failure: true
+
+assert-apply-contract:
+  stage: test
+  # Only needs a shell + grep; use a runner-pullable image (not ecs-catalog). Override via ASSERT_IMAGE.
+  image: "${ASSERT_IMAGE}"
+  variables:
+    ASSERT_IMAGE: "registry.web.boeing.com/amp/docker-images/terraform/terraform-azure/ubi8minimal-azterraform/v1.9.2:26.04.15"
+  script:
+    - set -euo pipefail
+    - tpl=templates/terraform/apply/template.yml
+    # 1. GitLab environment event wiring
+    - 'grep -Eq ''^\s*action:\s*start\s*$'' "$tpl" || { echo "[FAIL] missing environment action start"; exit 1; }'
+    - grep -Eq '^\s*name:\s*\$\[\[ inputs.environment \]\]' "$tpl" || { echo "[FAIL] environment name not wired to input"; exit 1; }
+    # 2. Managed Identity enforced; static secret rejected
+    - grep -q 'ARM_USE_MSI' "$tpl" || { echo "[FAIL] MSI not enforced"; exit 1; }
+    - grep -q 'ARM_CLIENT_SECRET is set' "$tpl" || { echo "[FAIL] static-secret guard missing"; exit 1; }
+    # 3. Applies a saved, integrity-checked plan (no auto-approve, no re-plan)
+    - grep -q 'terraform apply plan.tfplan' "$tpl" || { echo "[FAIL] not applying a saved plan"; exit 1; }
+    - grep -q 'sha256sum -c plan.tfplan.sha256' "$tpl" || { echo "[FAIL] plan integrity check missing"; exit 1; }
+    # Only flag an ACTUAL -auto-approve FLAG passed to terraform (ignore the explanatory
+    # 'NO -auto-approve' comment). A real use would look like: terraform apply -auto-approve ...
+    - 'if grep -Eq ''terraform[[:space:]]+(apply|destroy)[^#]*-auto-approve'' "$tpl"; then echo "[FAIL] -auto-approve flag present on a terraform command"; exit 1; fi'
+    # 4. Consumes the plan artifact via needs
+    - grep -q 'inputs.plan_job' "$tpl" || { echo "[FAIL] plan_job needs wiring missing"; exit 1; }
+    - 'echo "[PASS] terraform/apply contract: environment event, MSI-only, saved-plan apply, needs wiring"'

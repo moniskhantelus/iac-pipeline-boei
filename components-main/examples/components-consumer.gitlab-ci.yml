@@ -1,0 +1,19 @@
+# Publish corrected components; replace each ref with the same reviewed commit SHA.
+# Example UAT promotion; protected policy must map this consumer branch to uat.
+stages: [plan, approve, apply, audit]
+include:
+  - component: $CI_SERVER_FQDN/kaas/pipelines/components/terraform/plan@REPLACE_WITH_REVIEWED_SHA
+    inputs:
+      environment: uat
+  - component: $CI_SERVER_FQDN/kaas/pipelines/components/compliance-gates/terraform-gate@REPLACE_WITH_REVIEWED_SHA
+    inputs:
+      environment: uat
+  - component: $CI_SERVER_FQDN/kaas/pipelines/components/terraform/apply@REPLACE_WITH_REVIEWED_SHA
+    inputs:
+      environment: uat
+      plan_job: tf-plan
+      gate_job: tf-gate
+  - component: $CI_SERVER_FQDN/kaas/pipelines/components/compliance-gates/audit-record@REPLACE_WITH_REVIEWED_SHA
+    inputs:
+      environment: uat
+      apply_job: tf-apply

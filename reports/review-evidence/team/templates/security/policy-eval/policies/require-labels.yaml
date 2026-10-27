@@ -1,0 +1,21 @@
+apiVersion: kaas.boeing/policy-eval/v1
+kind: Policy
+metadata:
+  name: require-labels
+spec:
+  mode: Enforce
+  target: kubernetes
+  rules:
+    - name: mandatory-namespace-labels
+      match:
+        kinds: [Deployment, StatefulSet, DaemonSet]
+      validate:
+        message: "Workloads must carry the mandatory platform labels."
+        required_labels:
+          - team
+          - application-id
+          - esat-id
+          - cost-center
+          - environment
+          - tier
+          - support-group

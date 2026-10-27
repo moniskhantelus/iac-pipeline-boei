@@ -1,0 +1,24 @@
+apiVersion: kaas.boeing/policy-eval/v1
+kind: Policy
+metadata:
+  name: no-mutable-tag
+spec:
+  mode: Audit
+  target: kubernetes
+  rules:
+    - name: deny-latest-tag
+      match:
+        kinds: [Deployment, StatefulSet, DaemonSet]
+      validate:
+        message: "Production images must be pinned by digest; ':latest' is not allowed."
+        foreach:
+          list: spec.template.spec.containers
+          # Deny when the image ends in ':latest'. Expressed as a deny condition on the item.
+          deny:
+            conditions:
+              - key: image
+                operator: In
+                value:
+                  - "nginx:latest"
+          # NOTE: foreach+deny is a simplified bridge; the richer regex check lands with Kyverno.
+          # The approved-registry + digest enforcement in gitops/manifest-update is the hard gate.

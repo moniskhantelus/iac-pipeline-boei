@@ -1,0 +1,150 @@
+[
+  {
+    "path": ".gitlab-ci.yml",
+    "status": "modified"
+  },
+  {
+    "path": "FIXES-AND-DEPLOYMENT.md",
+    "status": "added"
+  },
+  {
+    "path": "IMPLEMENTATION-SUMMARY.md",
+    "status": "modified"
+  },
+  {
+    "path": "README.md",
+    "status": "modified"
+  },
+  {
+    "path": "STR-222-IMPLEMENTATION-SUMMARY.md",
+    "status": "modified"
+  },
+  {
+    "path": "STR-230-SUMMARY.md",
+    "status": "modified"
+  },
+  {
+    "path": "STR-230.md",
+    "status": "modified"
+  },
+  {
+    "path": "VALIDATION.md",
+    "status": "added"
+  },
+  {
+    "path": "control-config.example.json",
+    "status": "added"
+  },
+  {
+    "path": "examples/components-consumer.gitlab-ci.yml",
+    "status": "added"
+  },
+  {
+    "path": "examples/consumer.gitlab-ci.yml",
+    "status": "added"
+  },
+  {
+    "path": "finops/infra-cost/.finops_infracost.yml",
+    "status": "modified"
+  },
+  {
+    "path": "iac/.iac_audit_record.yml",
+    "status": "added"
+  },
+  {
+    "path": "iac/.iac_destroy_gate.yml",
+    "status": "added"
+  },
+  {
+    "path": "iac/.iac_destroy_plan.yml",
+    "status": "added"
+  },
+  {
+    "path": "iac/.iac_gates_job.yml",
+    "status": "added"
+  },
+  {
+    "path": "iac/.iac_tf_apply.yml",
+    "status": "modified"
+  },
+  {
+    "path": "iac/.iac_tf_destroy.yml",
+    "status": "modified"
+  },
+  {
+    "path": "iac/.iac_tf_init.yml",
+    "status": "modified"
+  },
+  {
+    "path": "lint/tflint/.tflint.yml",
+    "status": "modified"
+  },
+  {
+    "path": "runtime/audit-record.schema.json",
+    "status": "added"
+  },
+  {
+    "path": "runtime/control.py",
+    "status": "added"
+  },
+  {
+    "path": "runtime/query_audit.py",
+    "status": "added"
+  },
+  {
+    "path": "runtime/reconcile.py",
+    "status": "added"
+  },
+  {
+    "path": "runtime/replay_terminal.py",
+    "status": "added"
+  },
+  {
+    "path": "runtime/verify_worm.py",
+    "status": "added"
+  },
+  {
+    "path": "scan/coverity/.coverity.yml",
+    "status": "modified"
+  },
+  {
+    "path": "scan/terrascan/.terrascan.yml",
+    "status": "modified"
+  },
+  {
+    "path": "shared-services/audit/main.tf",
+    "status": "modified"
+  },
+  {
+    "path": "template-workflow/.iac_module_template.yml",
+    "status": "modified"
+  },
+  {
+    "path": "test/terra-test/.iac_terratest.yml",
+    "status": "modified"
+  },
+  {
+    "path": "test-results.txt",
+    "status": "added"
+  },
+  {
+    "path": "tests/control/test_command_flow.py",
+    "status": "added"
+  },
+  {
+    "path": "tests/control/test_control.py",
+    "status": "added"
+  },
+  {
+    "path": "tests/control/test_operations.py",
+    "status": "added"
+  },
+  {
+    "path": "tools/build_templates.py",
+    "status": "added"
+  },
+  {
+    "path": "variables/.variables.yml",
+    "status": "modified"
+  }
+]

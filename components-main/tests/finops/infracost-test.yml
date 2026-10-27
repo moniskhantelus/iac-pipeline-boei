@@ -1,0 +1,51 @@
+# Self-test: finops/infracost sources the cost tool from Boeing's INTERNAL registry at a PINNED
+# version (STR-225 / PRD REQ-SVC-13). A real cost run needs the mirrored image + a plan JSON + an
+# API key, so this is an INJECTION + CONFIGURATION contract test asserting the supply-chain
+# compliance of the published template at this revision. No Docker Hub pull happens.
+#
+# What is asserted (static, against the template):
+#   1. Image is the Boeing-internal registry path (registry.web.boeing.com/...).
+#   2. Image tag is PINNED (v0.10.39) — not :latest.
+#   3. No Docker Hub / public reference remains (no 'infracost/infracost' bare, no docker.io).
+#   4. The STR-225 fallback: infracost_skip defaults to 'Y' (step disabled until the mirror exists),
+#      with the tracking ticket referenced in a comment, and the skip path exits 0 (no hard fail).
+#   5. Cost estimation is advisory (allow_failure: true) and consumes plan.tfplan.json.
+include:
+  - local: templates/finops/infracost/template.yml
+    inputs:
+      job_name: test-infracost-contract
+      stage: test
+      tf_root: tests/fixtures/terraform-local
+      infracost_skip: "Y"   # keep the injected job a safe no-op
+
+# The injected infracost job stays dormant (needs the mirrored image + API key). Manual + allow_failure.
+test-infracost-contract:
+  rules:
+    - when: manual
+      allow_failure: true
+
+assert-infracost-contract:
+  stage: test
+  image: "${ASSERT_IMAGE}"
+  variables:
+    ASSERT_IMAGE: "registry.web.boeing.com/amp/docker-images/terraform/terraform-azure/ubi8minimal-azterraform/v1.9.2:26.04.15"
+  script:
+    - set -euo pipefail
+    - tpl=templates/finops/infracost/template.yml
+    # 1. Internal registry path
+    - grep -q 'registry.web.boeing.com/ecs-catalog/infracost/infracost' "$tpl" || { echo "[FAIL] not sourced from the internal registry"; exit 1; }
+    # 2. Pinned version, not latest. Only flag an ACTUAL latest tag (image line or version default),
+    #    not the word "latest" in explanatory comments/descriptions.
+    - grep -q 'v0.10.39' "$tpl" || { echo "[FAIL] version not pinned"; exit 1; }
+    - 'if grep -Eq "image:.*:latest|infracost_image_version:\s+.?latest.?\s*$" "$tpl"; then echo "[FAIL] latest tag present"; exit 1; fi'
+    # 3. No Docker Hub / public reference
+    - 'if grep -Eq "docker\.io|ghcr\.io" "$tpl"; then echo "[FAIL] public registry reference present"; exit 1; fi'
+    - 'if grep -Eq "image:\s*.?infracost/infracost" "$tpl"; then echo "[FAIL] bare Docker Hub image reference present"; exit 1; fi'
+    # 4. STR-225 fallback: skip defaults to Y, tracking ticket referenced, skip path exits 0
+    - 'grep -Eq "infracost_skip:" "$tpl" || { echo "[FAIL] infracost_skip input missing"; exit 1; }'
+    - grep -q 'STR-225' "$tpl" || { echo "[FAIL] STR-225 tracking reference missing"; exit 1; }
+    - 'grep -Eq ''\[ "\$\{SKIP\}" = "Y" \]'' "$tpl" || { echo "[FAIL] skip guard missing"; exit 1; }'
+    # 5. Advisory + consumes plan JSON
+    - 'grep -q "allow_failure: true" "$tpl" || { echo "[FAIL] cost step must be advisory (allow_failure)"; exit 1; }'
+    - grep -q 'plan.tfplan.json' "$tpl" || { echo "[FAIL] plan JSON input missing"; exit 1; }
+    - 'echo "[PASS] infracost contract - internal pinned image, no Docker Hub, STR-225 default-skip fallback, advisory"'

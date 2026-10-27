@@ -16,7 +16,7 @@ iac_terrascan_job:
   image: ${TERRASCAN_IMAGE}:${TERRASCAN_IMAGE_VERSION}
 
   variables:
-    GIT_SSL_NO_VERIFY: "true"
+    GIT_SSL_NO_VERIFY: "false"
     # TERRASCAN_TARGET_CLOUD: Cloud provider policy to apply
     # Options: azure, aws, gcp (or comma-separated for multiple: "azure,aws")
     # Override in GitLab CI/CD settings per project

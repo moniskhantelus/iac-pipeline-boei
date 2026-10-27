@@ -17,7 +17,7 @@ iac_tf_test_job:
   image: ${TFLINT_IMAGE}:${TFLINT_IMAGE_VERSION}
 
   variables:
-    GIT_SSL_NO_VERIFY: "true"
+    GIT_SSL_NO_VERIFY: "false"
     # TFLINT_TARGET_CLOUD: Cloud provider plugin to use
     # Options: azure, aws, gcp
     # Override in GitLab CI/CD settings per project

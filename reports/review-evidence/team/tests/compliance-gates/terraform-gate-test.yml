@@ -1,0 +1,63 @@
+# Self-test: compliance-gates/terraform-gate enforces environment-specific change control (STR-222).
+# The uat/prod paths call the GitLab approvals API, so they cannot run hermetically in CI. This is
+# therefore an INJECTION + CONFIGURATION contract test: it asserts the gate's required behaviors
+# statically against the published template at this revision. The dev path (auto-approve, no API)
+# is additionally injected and left dormant.
+#
+# What is asserted (vs the acceptance criteria):
+#   1. sandbox/dev AUTO-APPROVE with a logged environment (no manual action, no API call).
+#   2. uat/prod PAUSE for manual approval (rules: when: manual on uat|main).
+#   3. uat verifies >= MIN_APPROVALS_UAT via the GitLab approvals API.
+#   4. prod verifies >= MIN_APPROVALS_PROD approvals AND a ServiceNow change record (CHG pattern),
+#      with a distinct message per failed condition.
+#   5. FAIL-SAFE: every GitLab API call fails closed (blocks) if the API is unreachable.
+#   6. AUDIT TRAIL: every decision logs env, approvals, change-record, outcome (audit_decision).
+#   7. CLEANUP: no placeholder stub (`ls -la`, `echo "approved"`) remains.
+include:
+  # LOCAL include (not catalog component:@SHA) so the self-test resolves on any branch without a
+  # CI/CD Catalog release. (STR-299 / STR-222.)
+  - local: templates/compliance-gates/terraform-gate/template.yml
+    inputs:
+      job_name: test-tf-gate-dev
+      stage: test
+      environment: dev
+
+# The injected dev gate auto-approves only on a sandbox/dev branch; off those branches its rules
+# evaluate to when:never. Keep it dormant so the self-test pipeline passes on any branch.
+test-tf-gate-dev:
+  rules:
+    - when: manual
+      allow_failure: true
+
+assert-tf-gate-contract:
+  stage: test
+  image: "${ASSERT_IMAGE}"
+  variables:
+    # Any image the runner can pull with a shell + grep. Override via ASSERT_IMAGE if needed
+    # (ecs-catalog image-pull entitlement caveat, STR-214).
+    ASSERT_IMAGE: "registry.web.boeing.com/amp/docker-images/terraform/terraform-azure/ubi8minimal-azterraform/v1.9.2:26.04.15"
+  script:
+    - set -euo pipefail
+    - tpl=templates/compliance-gates/terraform-gate/template.yml
+    # 1. Auto-approve for sandbox/dev with env logged
+    - grep -Eq 'BRANCH_PREFIX.*=.*"sandbox".*\|\|.*"dev"|= "sandbox" \] \|\| \[ "\$\{BRANCH_PREFIX\}" = "dev"' "$tpl" || { echo "[FAIL] sandbox/dev auto-approve branch check missing"; exit 1; }
+    - grep -q 'Auto-approved for' "$tpl" || { echo "[FAIL] auto-approve log message missing"; exit 1; }
+    # 2. uat/prod pause for manual approval
+    - grep -Eq 'if:.*\(uat\|main\).*' "$tpl" || { echo "[FAIL] uat/main rule missing"; exit 1; }
+    - grep -Eq 'when:\s*manual' "$tpl" || { echo "[FAIL] manual approval pause missing"; exit 1; }
+    # 3. uat approval-count check via GitLab API
+    - grep -q 'MIN_APPROVALS_UAT' "$tpl" || { echo "[FAIL] uat minimum-approvals check missing"; exit 1; }
+    - grep -q '/approvals' "$tpl" || { echo "[FAIL] GitLab approvals API not queried"; exit 1; }
+    # 4. prod two conditions: approvals + ServiceNow change record, distinct messages
+    - grep -q 'MIN_APPROVALS_PROD' "$tpl" || { echo "[FAIL] prod minimum-approvals check missing"; exit 1; }
+    - grep -q 'CHG_PATTERN' "$tpl" || { echo "[FAIL] ServiceNow change-record pattern check missing"; exit 1; }
+    - grep -q 'ServiceNow change record' "$tpl" || { echo "[FAIL] change-record message missing"; exit 1; }
+    # 5. Fail-safe: API unreachable blocks (failing closed)
+    - grep -q 'failing closed' "$tpl" || { echo "[FAIL] fail-closed guard missing"; exit 1; }
+    # 6. Audit trail on every decision
+    - grep -q 'audit_decision' "$tpl" || { echo "[FAIL] audit_decision helper missing"; exit 1; }
+    - grep -q 'gate_decision environment=' "$tpl" || { echo "[FAIL] audit log record missing"; exit 1; }
+    # 7. No placeholder stub remains
+    - 'if grep -Eq ''^\s*-\s*ls -la\s*$'' "$tpl"; then echo "[FAIL] ls -la stub still present"; exit 1; fi'
+    - 'if grep -Eq ''echo "approved"'' "$tpl"; then echo "[FAIL] echo approved placeholder still present"; exit 1; fi'
+    - 'echo "[PASS] terraform-gate contract: dev auto-approve, uat/prod manual, approvals API, prod CHG, fail-closed, audit trail, no stub"'

@@ -1,0 +1,25 @@
+# STR-228 POLICY-5: Storage accounts must have soft delete and versioning enabled.
+apiVersion: kaas.boeing/policy-eval/v1
+kind: Policy
+metadata:
+  name: storage-soft-delete-versioning
+spec:
+  mode: Enforce
+  target: tfplan
+  rules:
+    - name: storage-blob-versioning-and-soft-delete
+      match:
+        resource_types:
+          - azurerm_storage_account
+      validate:
+        message: "Storage accounts must enable blob versioning and soft delete (blob_properties)."
+        # VIOLATE unless at least one blob_properties block enables versioning AND a
+        # delete-retention policy (soft delete). terraform renders blob_properties as a list.
+        foreach_any:
+          list: blob_properties
+          conditions:
+            - key: versioning_enabled
+              operator: Equals
+              value: true
+            - key: delete_retention_policy.0.days
+              operator: Exists

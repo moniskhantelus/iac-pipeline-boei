@@ -1,0 +1,108 @@
+spec:
+  inputs:
+    job_name:
+      description: "CI job name."
+      default: tf-gate
+    stage:
+      description: "Stage this job runs in (must be before the apply stage)."
+      default: approve
+    environment:
+      description: "Target environment (sandbox|dev|uat|prod). Drives gate strictness."
+      # required — no default
+    min_approvals_prod:
+      description: "Minimum MR approvals required for prod."
+      default: "2"
+    min_approvals_uat:
+      description: "Minimum MR approvals required for uat."
+      default: "1"
+    chg_pattern:
+      description: "Regex a prod MR description must match for a ServiceNow change record."
+      default: "CHG[0-9]{7}"
+    gate_image:
+      description: "Boeing-internal image with curl + jq."
+      default: "registry.web.boeing.com/ecs-catalog/docker-images/curl-jq/v1"
+---
+
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: "$[[ inputs.gate_image ]]"
+  variables:
+    GATE_ENV: "$[[ inputs.environment ]]"
+    MIN_APPROVALS_PROD: "$[[ inputs.min_approvals_prod ]]"
+    MIN_APPROVALS_UAT: "$[[ inputs.min_approvals_uat ]]"
+    CHG_PATTERN: "$[[ inputs.chg_pattern ]]"
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^(sandbox|dev)(_[a-zA-Z0-9_]+)?$/'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH =~ /^(uat|main)(_[a-zA-Z0-9_]+)?$/'
+      when: manual
+    - when: never
+  script:
+    - set -euo pipefail
+    - |
+      BRANCH_PREFIX="${CI_COMMIT_BRANCH%%_*}"
+      echo "[INFO] Approval gate for environment='${GATE_ENV}' branch_prefix='${BRANCH_PREFIX}'"
+
+      # --- Audit trail: every gate decision logs env, approvals found, change-record present, outcome.
+      # audit_decision <approvals> <chg_present:yes|no|n/a> <outcome:APPROVED|BLOCKED> <reason>
+      audit_decision() {
+        echo "[AUDIT] gate_decision environment=${GATE_ENV} branch=${CI_COMMIT_BRANCH} approvals_found=${1} change_record=${2} outcome=${3} reason=\"${4}\""
+      }
+
+      if [ "${BRANCH_PREFIX}" = "sandbox" ] || [ "${BRANCH_PREFIX}" = "dev" ]; then
+        echo "[INFO] Auto-approved for ${BRANCH_PREFIX}"
+        audit_decision "n/a" "n/a" "APPROVED" "auto-approval for ${BRANCH_PREFIX}"
+        exit 0
+      fi
+
+      API="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}"
+      MR_IID=$(curl --silent --fail --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        "${API}/merge_requests?state=opened&source_branch=${CI_COMMIT_BRANCH}" \
+        | jq -r '.[0].iid // empty') \
+        || { echo "[ERROR] GitLab API unreachable — failing closed"; audit_decision "unknown" "unknown" "BLOCKED" "GitLab API unreachable"; exit 1; }
+
+      if [ -z "${MR_IID}" ]; then
+        echo "[ERROR] No open MR found for branch ${CI_COMMIT_BRANCH} — cannot verify approvals; failing closed"
+        audit_decision "unknown" "unknown" "BLOCKED" "no open MR found for ${CI_COMMIT_BRANCH}"
+        exit 1
+      fi
+
+      APPROVALS=$(curl --silent --fail --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        "${API}/merge_requests/${MR_IID}/approvals" | jq -r '.approved_by | length') \
+        || { echo "[ERROR] Approvals API unreachable — failing closed"; audit_decision "unknown" "unknown" "BLOCKED" "approvals API unreachable"; exit 1; }
+      MR_DESC=$(curl --silent --fail --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        "${API}/merge_requests/${MR_IID}" | jq -r '.description // ""') \
+        || { echo "[ERROR] MR API unreachable — failing closed"; audit_decision "${APPROVALS}" "unknown" "BLOCKED" "MR API unreachable"; exit 1; }
+
+      echo "[INFO] MR !${MR_IID}: approvals=${APPROVALS}"
+
+      if [ "${BRANCH_PREFIX}" = "uat" ]; then
+        if [ "${APPROVALS}" -lt "${MIN_APPROVALS_UAT}" ]; then
+          echo "[ERROR] uat requires ${MIN_APPROVALS_UAT} approval(s); found ${APPROVALS}"
+          audit_decision "${APPROVALS}" "n/a" "BLOCKED" "uat needs ${MIN_APPROVALS_UAT} approval(s), found ${APPROVALS}"
+          exit 1
+        fi
+        echo "[INFO] uat gate passed (approvals=${APPROVALS})"
+        audit_decision "${APPROVALS}" "n/a" "APPROVED" "uat approvals satisfied"
+        exit 0
+      fi
+
+      # prod (main)
+      FAIL=0
+      if [ "${APPROVALS}" -lt "${MIN_APPROVALS_PROD}" ]; then
+        echo "[ERROR] prod requires ${MIN_APPROVALS_PROD} approvals; found ${APPROVALS}"; FAIL=1
+      fi
+      if echo "${MR_DESC}" | grep -Eq "${CHG_PATTERN}"; then
+        echo "[INFO] ServiceNow change record found in MR description"
+        CHG_PRESENT="yes"
+      else
+        echo "[ERROR] prod requires a ServiceNow change record matching /${CHG_PATTERN}/ in the MR description"; FAIL=1
+        CHG_PRESENT="no"
+      fi
+      if [ "${FAIL}" -ne 0 ]; then
+        audit_decision "${APPROVALS}" "${CHG_PRESENT}" "BLOCKED" "prod requirements not met (need >=${MIN_APPROVALS_PROD} approvals + ServiceNow CHG)"
+        exit 1
+      fi
+      echo "[INFO] prod gate passed (approvals=${APPROVALS}, CHG present)"
+      audit_decision "${APPROVALS}" "${CHG_PRESENT}" "APPROVED" "prod approvals + change record satisfied"
+  allow_failure: false

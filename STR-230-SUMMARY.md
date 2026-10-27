@@ -1,3 +1,5 @@
+> SUPERSEDED: see FIXES-AND-DEPLOYMENT.md for the corrected implementation and remaining acceptance steps.
+
 # STR-230 — Tamper-Proof Record of Every Infrastructure Change
 
 **Approach: consume the official KaaS component for the pipeline logic; provision the WORM

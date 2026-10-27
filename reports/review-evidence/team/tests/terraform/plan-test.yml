@@ -1,0 +1,43 @@
+# Self-test: plan the local-backend fixture (no Azure creds) and assert artifacts.
+include:
+  # LOCAL include (not catalog component:@SHA) so the self-test resolves on any branch without a
+  # CI/CD Catalog release. See validate-test.yml for the rationale. (STR-299.)
+  - local: templates/terraform/plan/template.yml
+    inputs:
+      job_name: test-tf-plan
+      stage: test
+      environment: test
+      tf_root: tests/fixtures/terraform-local
+      backend: local
+      # Pass an explicit per-environment cache key. A `- local:` include does NOT resolve
+      # $[[ inputs.* ]], so relying on the template default would only work because that default is
+      # now a static literal. Setting it here mirrors how a real consumer scopes the key per env.
+      cache_key: tfplan-test
+
+# Self-tests run only on branch/MR CI — NEVER on a tag (release) pipeline, where the injected
+# test-tf-plan job is not created and verify-plan-artifacts' `needs:` would fail the release
+# pipeline at compile time (blocking catalog publishing). [STR-215]
+.selftest_rules: &selftest_rules
+  rules:
+    - if: '$CI_COMMIT_TAG'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+# Gate the injected plan job off tag pipelines (the template declares no rules).
+test-tf-plan:
+  <<: *selftest_rules
+
+verify-plan-artifacts:
+  <<: *selftest_rules
+  stage: test
+  # Needs jq + test (no curl). Runner-pullable image (not ecs-catalog — STR-214); amp image ships jq.
+  image: "${ASSERT_IMAGE}"
+  variables:
+    ASSERT_IMAGE: "registry.web.boeing.com/amp/docker-images/terraform/terraform-azure/ubi8minimal-azterraform/v1.9.2:26.04.15"
+  needs: [test-tf-plan]
+  script:
+    - test -f tests/fixtures/terraform-local/plan.tfplan
+    - test -f tests/fixtures/terraform-local/plan.tfplan.json
+    - jq -e . tests/fixtures/terraform-local/plan.tfplan.json > /dev/null
+    - echo "[PASS] plan produced binary + valid JSON artifacts"

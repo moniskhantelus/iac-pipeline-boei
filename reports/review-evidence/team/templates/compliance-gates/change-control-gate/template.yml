@@ -1,0 +1,67 @@
+spec:
+  inputs:
+    job_name:
+      description: "CI job name."
+      default: change-control-gate
+    stage:
+      description: "Stage this job runs in."
+      default: validate
+    high_risk_globs:
+      description: "Space-separated globs that mark a High-risk change (RBAC/netpol/admission)."
+      default: "**/rbac/** **/networkpolicy/** **/policy/** **/*clusterrole*"
+    normal_globs:
+      description: "Globs that mark a Normal change (platform component/version)."
+      default: "platform-services/** clusters/**"
+    chg_pattern:
+      description: "ServiceNow change-record regex required for High-risk MRs."
+      default: "CHG[0-9]{7}"
+    image:
+      description: "Boeing-internal image with git, curl, jq."
+      default: "registry.web.boeing.com/ecs-catalog/docker-images/curl-jq/v1"
+---
+
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: "$[[ inputs.image ]]"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  variables:
+    HIGH_RISK_GLOBS: "$[[ inputs.high_risk_globs ]]"
+    NORMAL_GLOBS: "$[[ inputs.normal_globs ]]"
+    CHG_PATTERN: "$[[ inputs.chg_pattern ]]"
+  script:
+    - set -euo pipefail
+    - API="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}"
+    - |
+      git fetch origin "${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}" --depth 50
+      CHANGED=$(git diff --name-only "origin/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}...HEAD")
+      echo "[INFO] Changed files:"; echo "${CHANGED}"
+
+      matches() { for g in $1; do echo "${CHANGED}" | grep -q -- "$(echo "$g" | sed 's/\*\*/.*/g; s/\*/[^\/]*/g')" && return 0; done; return 1; }
+
+      CLASS="standard"; MIN=1
+      if matches "${NORMAL_GLOBS}"; then CLASS="normal"; MIN=2; fi
+      if matches "${HIGH_RISK_GLOBS}"; then CLASS="high-risk"; MIN=2; fi
+      echo "[INFO] Change class: ${CLASS} (min approvals ${MIN})"
+
+      APPROVALS=$(curl --silent --fail --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        "${API}/merge_requests/${CI_MERGE_REQUEST_IID}/approvals" | jq -r '.approved_by | length') \
+        || { echo "[ERROR] Approvals API unreachable — failing closed"; exit 1; }
+      echo "[INFO] Approvals found: ${APPROVALS}"
+
+      FAIL=0
+      [ "${APPROVALS}" -lt "${MIN}" ] && { echo "[ERROR] ${CLASS} requires ${MIN} approval(s); found ${APPROVALS}"; FAIL=1; }
+
+      if [ "${CLASS}" = "high-risk" ]; then
+        DESC=$(curl --silent --fail --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+          "${API}/merge_requests/${CI_MERGE_REQUEST_IID}" | jq -r '.description // ""') \
+          || { echo "[ERROR] MR API unreachable — failing closed"; exit 1; }
+        if echo "${DESC}" | grep -Eq "${CHG_PATTERN}"; then
+          echo "[INFO] ServiceNow change record present"
+        else
+          echo "[ERROR] High-risk change requires a ServiceNow record matching /${CHG_PATTERN}/"; FAIL=1
+        fi
+      fi
+      [ "${FAIL}" -ne 0 ] && exit 1
+      echo "[INFO] change-control-gate passed (${CLASS})"
+  allow_failure: false

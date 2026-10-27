@@ -1,0 +1,82 @@
+spec:
+  inputs:
+    job_name:
+      description: "CI job name."
+      default: gitops-update
+    stage:
+      description: "Stage this job runs in."
+      default: gitops-update
+    image_ref:
+      description: "Full image digest reference to deploy (repo@sha256:...)."
+      default: "$IMAGE_REF"
+    sbom_job:
+      description: "Upstream job providing IMAGE_REF (needs:)."
+      default: sbom
+    gitops_repo:
+      description: "GitOps repo path to update (SSH clone, deploy-key auth)."
+      # required
+    overlay_path:
+      description: "Overlay directory within the GitOps repo (e.g. overlays/dev)."
+      default: "overlays/dev"
+    environment:
+      description: "Target environment (dev|staging|prod) — used in branch/MR naming."
+      default: "dev"
+    image_name_in_kustomize:
+      description: "The image 'name' key kustomize should set (logical name, not the digest)."
+      default: "app"
+    dry_run:
+      description: "If true, prepare the edit but do not push/MR (self-test)."
+      default: "false"
+    tools_image:
+      description: "Boeing-internal image with git, glab, kustomize, yq."
+      default: "registry.web.boeing.com/ecs-catalog/docker-images/gitops-tools/v1"
+    tools_image_version:
+      description: "Pinned tag."
+      default: "1.0.0"
+  component:
+    - name
+    - version
+---
+
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: "$[[ inputs.tools_image ]]:$[[ inputs.tools_image_version ]]"
+  needs:
+    - job: "$[[ inputs.sbom_job ]]"
+      artifacts: true
+  variables:
+    IMAGE_REF: "$[[ inputs.image_ref ]]"
+    GITOPS_REPO: "$[[ inputs.gitops_repo ]]"
+    OVERLAY_PATH: "$[[ inputs.overlay_path ]]"
+    ENVIRONMENT: "$[[ inputs.environment ]]"
+    IMG_NAME: "$[[ inputs.image_name_in_kustomize ]]"
+    DRY_RUN: "$[[ inputs.dry_run ]]"
+  script:
+    - set -euo pipefail
+    - |
+      if [ -z "${IMAGE_REF:-}" ]; then echo "[ERROR] IMAGE_REF empty." >&2; exit 1; fi
+      case "${IMAGE_REF}" in
+        *@sha256:*) : ;;  # digest reference — good
+        *) echo "[ERROR] IMAGE_REF '${IMAGE_REF}' is not a digest. Production manifests must pin by @sha256:." >&2; exit 1;;
+      esac
+    # Deploy-key auth: GITOPS_DEPLOY_KEY is a protected CI variable (SSH private key).
+    - mkdir -p ~/.ssh && echo "${GITOPS_DEPLOY_KEY}" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+    - ssh-keyscan -H "${CI_SERVER_HOST}" >> ~/.ssh/known_hosts 2>/dev/null
+    - git clone "git@${CI_SERVER_HOST}:${GITOPS_REPO}.git" gitops
+    - cd gitops/"${OVERLAY_PATH}"
+    - REPO="${IMAGE_REF%@*}"; DIGEST="${IMAGE_REF#*@}"
+    - kustomize edit set image "${IMG_NAME}=${REPO}@${DIGEST}"
+    - git --no-pager diff
+    - |
+      if [ "${DRY_RUN}" = "true" ]; then echo "[INFO] dry-run: not pushing"; exit 0; fi
+      cd "${CI_PROJECT_DIR}/gitops"
+      BRANCH="deploy/${ENVIRONMENT}/${CI_COMMIT_SHORT_SHA}"
+      git checkout -b "${BRANCH}"
+      git add -A
+      git commit -m "deploy(${ENVIRONMENT}): ${REPO}@${DIGEST} [pipeline ${CI_PIPELINE_ID}]"
+      git push origin "${BRANCH}"
+      glab mr create --source-branch "${BRANCH}" --target-branch main \
+        --title "Deploy ${IMG_NAME} to ${ENVIRONMENT} (${CI_COMMIT_SHORT_SHA})" \
+        --description "Digest: ${REPO}@${DIGEST}. Source pipeline: ${CI_PIPELINE_URL}. GitOps agent reconciles after merge."
+    - 'echo "[INFO] GitOps MR opened; agent will reconcile ($CI_PROJECT_PATH@$CI_COMMIT_SHORT_SHA)"'
+  allow_failure: false

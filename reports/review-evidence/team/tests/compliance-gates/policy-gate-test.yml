@@ -1,0 +1,23 @@
+# Self-test: validate the passing manifest fixture using this repo's own fixtures as the policy set.
+# NOTE: policy_repo defaults to the platform library; for a hermetic self-test the pair should point
+# policy_repo at a small bundled fixture policy set (TODO(pair)) or run this test in an environment
+# with read access to kaas/platform/policy-library@v1.0.0.
+include:
+  - local: templates/compliance-gates/policy-gate/template.yml   # LOCAL (not catalog @SHA) — resolves on any branch, no catalog release needed (STR-299)
+    inputs:
+      job_name: test-policy-pass
+      stage: test
+      manifest_dir: tests/fixtures/manifests-pass
+      policy_repo: $CI_PROJECT_PATH
+      policy_ref: $CI_COMMIT_SHA
+
+verify-policy-gate-job-present:
+  stage: test
+  image: registry.web.boeing.com/ecs-catalog/docker-images/curl-jq/v1   # TODO(pair): pin tag
+  script:
+    - |
+      route="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/pipelines/${CI_PIPELINE_ID}/jobs"
+      count=$(curl --silent --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "$route" \
+        | jq 'map(select(.name | contains("test-policy-pass"))) | length')
+      if [ "$count" -lt 1 ]; then echo "[FAIL] policy-gate job not injected"; exit 1; fi
+      echo "[PASS] policy-gate job injected"

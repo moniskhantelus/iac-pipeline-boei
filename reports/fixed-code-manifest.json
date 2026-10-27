@@ -1,0 +1,12 @@
+{
+  "iac-pipeline-STR-222-STR-230-fixed.zip": {
+    "sha256": "7188b0c0fa1c6459b13457eccc002c802bf4e26e6c876156983d308760be4b08",
+    "files_changed": 37,
+    "local_tests": 50
+  },
+  "components-main-STR-222-STR-230-fixed.zip": {
+    "sha256": "48635cc0aa8fd87496e71ec27593fb947f5d1c21dd03c79908ee7ec2e8b8400e",
+    "files_changed": 40,
+    "local_tests": 50
+  }
+}

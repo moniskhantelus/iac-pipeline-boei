@@ -1,0 +1,151 @@
+# =============================================================================
+# Component: terraform/destroy
+# -----------------------------------------------------------------------------
+# Project : kaas/pipelines (components CI/CD Component project)
+# Story   : STR-299 - explicit, guarded destruction control (Rec 2 / Appendix C A3)
+# Purpose : Tears down a Terraform-managed environment ONLY when destruction is
+#           explicitly enabled, and ONLY with authorization appropriate to the
+#           target's lifecycle class. Closes the STR-299 gap that there was no
+#           first-class destroy component and no destroy-enable guard.
+#
+# STR-299 Recommendation 2 / A3 requirements implemented here:
+#   - "destroy disabled means no destroy command" -> the destroy_enabled guard
+#     exits 0 WITHOUT running terraform destroy when the flag is not "true".
+#   - "persistent targets need distinct authorization" -> disposable classes
+#     (sandbox/dev/test/ephemeral) auto-run; persistent classes (uat/prod) are
+#     manual AND require an explicit typed confirmation token to match the env.
+#   - Zero static credentials (Managed Identity only), consistent with plan/apply.
+#   - What is destroyed is what was reviewed: we `plan -destroy -out`, render it,
+#     then `apply` that saved destroy plan (no ad-hoc destroy).
+#
+# Usage:
+#   include:
+#     - component: $CI_SERVER_FQDN/kaas/pipelines/components/terraform/destroy@0.1.0
+#       inputs:
+#         job_name: tf-destroy
+#         environment: dev
+#         tf_root: examples/basic
+#   # To actually run, the consumer must set destroy_enabled: "true" (default is "false").
+# =============================================================================
+
+spec:
+  inputs:
+    job_name:
+      description: "CI job name. Include more than once with distinct names to produce distinct jobs."
+      default: tf-destroy
+    stage:
+      description: "Stage this job runs in. Consumer must declare it in its stages list."
+      default: destroy
+    environment:
+      description: "Target environment (sandbox|dev|test|uat|prod|...). Scopes state key and gate strictness."
+      # required — no default
+    tf_root:
+      description: "Path to the Terraform root to destroy, relative to the repo root."
+      # required — no default
+    destroy_enabled:
+      description: "MASTER SWITCH. Destruction only runs when this is the string 'true'. Any other value is a no-op (command never runs)."
+      default: "false"
+    persistent_environments:
+      description: "Space-separated env-name prefixes treated as PERSISTENT (require typed confirmation + manual run)."
+      default: "uat prod"
+    confirm_destroy:
+      description: "For persistent environments: must equal the environment name to authorize. Pass via a protected/manual variable, never defaulted in the repo."
+      default: ""
+    tf_root_lock_timeout:
+      description: "State lock timeout passed to terraform (e.g. 300s)."
+      default: "300s"
+    terraform_image:
+      description: "Boeing-internal Terraform image (no Docker Hub, no :latest)."
+      default: "registry.web.boeing.com/amp/docker-images/terraform/terraform-azure/ubi8minimal-azterraform/v1.9.2"
+    terraform_image_version:
+      description: "Tag of the Terraform image."
+      default: "26.04.15"
+    arm_environment:
+      description: "Azure cloud for the azurerm provider (AzureUSGovernment for Gov)."
+      default: "AzureUSGovernment"
+  component:
+    - name
+    - version
+---
+
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: "$[[ inputs.terraform_image ]]:$[[ inputs.terraform_image_version ]]"
+  environment:
+    name: $[[ inputs.environment ]]
+    action: stop
+  variables:
+    # STR-299 (Rec 5): Git TLS verification stays ON. The Boeing-internal image trusts the
+    # corporate CA; never disable verification globally. (Mirrors plan/apply.)
+    GIT_SSL_NO_VERIFY: "false"
+    TF_ROOT: "$[[ inputs.tf_root ]]"
+    TF_ENV: "$[[ inputs.environment ]]"
+    DESTROY_ENABLED: "$[[ inputs.destroy_enabled ]]"
+    PERSISTENT_ENVIRONMENTS: "$[[ inputs.persistent_environments ]]"
+    CONFIRM_DESTROY: "$[[ inputs.confirm_destroy ]]"
+    LOCK_TIMEOUT: "$[[ inputs.tf_root_lock_timeout ]]"
+  rules:
+    # Never on MRs or feature branches.
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: never
+    # Disposable classes (sandbox/dev/test) may run automatically on their branches.
+    - if: '$CI_COMMIT_BRANCH =~ /^(sandbox|dev|test)(_[a-zA-Z0-9_]+)?$/'
+      when: on_success
+    # Persistent classes (uat/main->prod) are ALWAYS a manual action — never auto-destroy.
+    - if: '$CI_COMMIT_BRANCH =~ /^(uat|main)(_[a-zA-Z0-9_]+)?$/'
+      when: manual
+    - when: never
+  script:
+    - set -euo pipefail
+    # --- GUARD 1: master switch. If destruction is not explicitly enabled, the command never runs. ---
+    - |
+      if [ "${DESTROY_ENABLED}" != "true" ]; then
+        echo "[INFO] destroy_enabled='${DESTROY_ENABLED}' (not 'true'). Destruction is DISABLED."
+        echo "[INFO] No terraform destroy will run. Set destroy_enabled: \"true\" to authorize. (STR-299 A3)"
+        exit 0
+      fi
+    # --- GUARD 2: persistent environments need a typed confirmation matching the env name. ---
+    - |
+      ENV_PREFIX="${TF_ENV%%_*}"
+      IS_PERSISTENT="false"
+      for p in ${PERSISTENT_ENVIRONMENTS}; do
+        if [ "${ENV_PREFIX}" = "${p}" ]; then IS_PERSISTENT="true"; fi
+      done
+      if [ "${IS_PERSISTENT}" = "true" ]; then
+        echo "[INFO] '${TF_ENV}' is a PERSISTENT environment — distinct authorization required (STR-299 A3)."
+        if [ "${CONFIRM_DESTROY}" != "${TF_ENV}" ]; then
+          echo "[ERROR] Persistent destroy requires confirm_destroy to equal '${TF_ENV}'. Got '${CONFIRM_DESTROY:-<empty>}'." >&2
+          echo "[ERROR] Refusing to destroy a persistent environment without explicit, matching confirmation." >&2
+          exit 1
+        fi
+        echo "[INFO] Confirmation token matches '${TF_ENV}'. Proceeding under manual authorization."
+      else
+        echo "[INFO] '${TF_ENV}' is a disposable environment — standard cleanup."
+      fi
+    # --- GUARD 3: static credentials are prohibited (zero-static-credential requirement). ---
+    - |
+      if [ -n "${ARM_CLIENT_SECRET:-}" ]; then
+        echo "[ERROR] ARM_CLIENT_SECRET is set. Static credentials are prohibited. Use Managed Identity." >&2
+        exit 1
+      fi
+    # --- Managed Identity auth (mirrors plan/apply). ---
+    - export ARM_USE_MSI="true"
+    - export ARM_ENVIRONMENT="$[[ inputs.arm_environment ]]"
+    - 'echo "[INFO] Authenticating with Managed Identity (ARM_USE_MSI=true, env=${ARM_ENVIRONMENT})"'
+    - az cloud set --name "${ARM_ENVIRONMENT}"
+    - az login --identity --output none
+    - az account show --query '{subscription:name, id:id}' -o json
+    # --- init against the real backend, then review-then-apply a SAVED destroy plan ---
+    - cd "${TF_ROOT}"
+    - terraform version
+    - terraform init -reconfigure -backend-config="backend.${TF_ENV}.hcl"
+    # What we destroy is what we reviewed: create a saved destroy plan, render it, then apply it.
+    - terraform plan -destroy -input=false -lock-timeout="${LOCK_TIMEOUT}" -out=destroy.tfplan
+    - terraform show -no-color destroy.tfplan | tee destroy-plan.txt
+    - terraform apply -input=false -lock-timeout="${LOCK_TIMEOUT}" destroy.tfplan
+    - echo "[INFO] Destroy complete for environment ${TF_ENV} (component $CI_PROJECT_PATH@$CI_COMMIT_SHORT_SHA)"
+  artifacts:
+    paths:
+      - "$[[ inputs.tf_root ]]/destroy-plan.txt"
+    when: always
+  allow_failure: false

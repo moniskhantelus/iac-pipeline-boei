@@ -1,0 +1,88 @@
+spec:
+  inputs:
+    job_name:
+      description: "CI job name."
+      default: golden-path-request
+    stage:
+      description: "Stage this job runs in."
+      default: provision
+    request_file:
+      description: "Path to the onboarding request YAML."
+      default: "onboarding.yaml"
+    archetype:
+      description: "Golden-path archetype: gp-api|gp-web|gp-worker|gp-batch|gp-stateful."
+      default: "gp-api"
+    gitops_repo:
+      description: "Platform GitOps repo to open the provisioning MR against."
+      default: "kaas/platform/platform-gitops"
+    templates_repo:
+      description: "Repo holding the golden-path archetype templates."
+      default: "kaas/platform/golden-path-templates"
+    templates_ref:
+      description: "Pinned tag of the templates repo."
+      default: "v1.0.0"
+    dry_run:
+      description: "If true, render but do not push/MR (self-test)."
+      default: "false"
+    image:
+      description: "Boeing-internal image with git, glab, yq, kustomize, gomplate."
+      default: "registry.web.boeing.com/ecs-catalog/docker-images/onboarding-tools/v1"
+    image_version:
+      description: "Pinned tag."
+      default: "1.0.0"
+  component:
+    - name
+    - version
+---
+
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: "$[[ inputs.image ]]:$[[ inputs.image_version ]]"
+  variables:
+    REQ: "$[[ inputs.request_file ]]"
+    ARCHETYPE: "$[[ inputs.archetype ]]"
+    GITOPS_REPO: "$[[ inputs.gitops_repo ]]"
+    TEMPLATES_REPO: "$[[ inputs.templates_repo ]]"
+    TEMPLATES_REF: "$[[ inputs.templates_ref ]]"
+    DRY_RUN: "$[[ inputs.dry_run ]]"
+  script:
+    - set -euo pipefail
+    - '[ -f "${REQ}" ] || { echo "[ERROR] ${REQ} not found" >&2; exit 1; }'
+    - APP=$(yq -r '.applicationId' "${REQ}"); TEAM=$(yq -r '.team' "${REQ}"); TIER=$(yq -r '.tier' "${REQ}")
+    - 'echo "[INFO] Provisioning ${ARCHETYPE} for app=${APP} team=${TEAM} tier=${TIER}"'
+    - git clone --depth 1 --branch "${TEMPLATES_REF}" "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${TEMPLATES_REPO}.git" .templates
+    - mkdir -p rendered
+    - |
+      export APP TEAM TIER ARCHETYPE
+      export ESAT_ID=$(yq -r '.esatId' "${REQ}")
+      export COST_CENTER=$(yq -r '.costCenter' "${REQ}")
+      export SUPPORT_GROUP=$(yq -r '.supportGroup // "sg-'"${TEAM}"'"' "${REQ}")
+      find ".templates/archetypes/${ARCHETYPE}" -type f -name '*.tmpl' | while read -r t; do
+        out="rendered/${t#.templates/archetypes/${ARCHETYPE}/}"; out="${out%.tmpl}"
+        mkdir -p "$(dirname "$out")"
+        gomplate -f "$t" -o "$out"
+      done
+      echo "[INFO] Rendered resources:"; find rendered -type f
+    - mkdir -p ~/.ssh && echo "${GITOPS_DEPLOY_KEY}" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+    - ssh-keyscan -H "${CI_SERVER_HOST}" >> ~/.ssh/known_hosts 2>/dev/null
+    - git clone "git@${CI_SERVER_HOST}:${GITOPS_REPO}.git" gitops
+    - |
+      DEST="gitops/app-teams/${TEAM}/${APP}"
+      mkdir -p "${DEST}"
+      cp -r rendered/* "${DEST}/"
+      kustomize build "${DEST}/overlays/dev" >/dev/null
+      if [ "${DRY_RUN}" = "true" ]; then echo "[INFO] dry-run: rendered + validated, not pushing"; exit 0; fi
+      cd gitops
+      BRANCH="onboard/${TEAM}-${APP}"
+      git checkout -B "${BRANCH}"
+      git add -A
+      git commit -m "onboard(${ARCHETYPE}): provision ${TEAM}/${APP} [pipeline ${CI_PIPELINE_ID}]"
+      git push -f origin "${BRANCH}"
+      glab mr create --source-branch "${BRANCH}" --target-branch main \
+        --title "Onboard ${TEAM}/${APP} (${ARCHETYPE})" \
+        --description "Atomic golden-path provisioning: namespace, RBAC, network policies, GitOps scaffold, ExternalSecret, observability, CI pipeline. Request pipeline: ${CI_PIPELINE_URL}"
+    - 'echo "[INFO] Provisioning MR opened ($CI_PROJECT_PATH@$CI_COMMIT_SHORT_SHA)"'
+  artifacts:
+    paths: [rendered/]
+    when: always
+  allow_failure: false

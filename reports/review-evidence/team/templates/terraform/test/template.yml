@@ -1,0 +1,142 @@
+spec:
+  inputs:
+    job_name:
+      description: "CI job name."
+      default: tf-test
+    stage:
+      description: "Stage this job runs in."
+      default: test
+    tf_root:
+      description: "Path to the Terraform root under test, relative to the repo root."
+      default: "."
+    spec_file:
+      description: "Assertion spec filename, relative to tf_root."
+      default: "tftest.yaml"
+    mode:
+      description: "plan (no creds, MR-safe) or apply-ephemeral (MSI, throwaway RG stood up, asserted against applied state, then ALWAYS destroyed via EXIT trap; schedule this mode)."
+      default: "plan"
+    environment:
+      description: "Environment name (only used by apply-ephemeral mode for state/RG naming)."
+      default: "test"
+    terraform_image:
+      description: "Boeing-internal image bundling Terraform + Python 3."
+      default: "registry.web.boeing.com/amp/docker-images/terraform/terraform-azure/ubi8minimal-azterraform/v1.9.2"
+    terraform_image_version:
+      description: "Tag of the Terraform+Python image."
+      default: "26.04.15"
+    arm_environment:
+      description: "Azure cloud for apply-ephemeral mode."
+      default: "AzureUSGovernment"
+  component:
+    - name
+    - version
+    - sha
+---
+
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: "$[[ inputs.terraform_image ]]:$[[ inputs.terraform_image_version ]]"
+  variables:
+    # STR-299 (Rec 5 — harden credentials / control toolchain): disabling Git TLS verification is a
+    # man-in-the-middle risk and was flagged for removal. The Boeing-internal Terraform image already
+    # trusts the corporate CA, so clone/fetch over HTTPS verifies normally. Do NOT re-enable the
+    # bypass; if a specific internal host is untrusted, install its CA cert rather than turning
+    # verification off globally.
+    # GIT_SSL_NO_VERIFY: "true"   # REMOVED (STR-299 Rec 5) — do not reinstate
+    GIT_SSL_NO_VERIFY: "false"
+    TF_ROOT: "$[[ inputs.tf_root ]]"
+    SPEC_FILE: "$[[ inputs.spec_file ]]"
+    TEST_MODE: "$[[ inputs.mode ]]"
+    TF_ENV: "$[[ inputs.environment ]]"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH'
+      when: on_success
+  script:
+    - set -euo pipefail
+    # --- Obtain the runner script ------------------------------------------------------------
+    # Prefer the copy already in the checked-out repo (present for THIS repo's self-test and for
+    # any consumer that vendors the template path); otherwise fetch it over the API at the current
+    # commit. This avoids the component-sha interpolation, which is only valid for catalog
+    # includes and errors under a local include (STR-299 self-test on an unregistered branch).
+    - |
+      SRC="templates/terraform/test/tf_test.py"
+      if [ -f "${SRC}" ]; then
+        echo "[INFO] Using runner from checked-out repo: ${SRC}"
+        cp "${SRC}" tf_test.py
+      else
+        RUNNER_URL="${CI_API_V4_URL}/projects/kaas%2Fpipelines%2Fcomponents/repository/files/templates%2Fterraform%2Ftest%2Ftf_test.py/raw?ref=${CI_COMMIT_SHA}"
+        echo "[INFO] Fetching runner at ${CI_COMMIT_SHA}: ${RUNNER_URL}"
+        curl --silent --fail --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "${RUNNER_URL}" -o tf_test.py \
+          || { echo "[ERROR] Could not obtain tf_test.py (no local copy, API fetch failed)." >&2; exit 2; }
+      fi
+    - python3 --version
+    - terraform version
+    # -------------------------------------------------------------------------
+    # apply-ephemeral mode (STR-299 Rec 6 / Appendix C A8): stand up a throwaway
+    # environment, run post-apply assertions against the REAL applied state, and
+    # ALWAYS tear it down. The teardown is wired via a shell `trap ... EXIT` BEFORE
+    # apply, so the ephemeral resources are destroyed even if apply or the
+    # assertions fail — no orphaned RG is ever left behind. This replaces the old
+    # TODO/WARN placeholder; required tests can no longer silently skip.
+    # -------------------------------------------------------------------------
+    - |
+      if [ "${TEST_MODE}" = "apply-ephemeral" ]; then
+        echo "[INFO] apply-ephemeral mode — Managed Identity + throwaway resource group"
+        if [ -n "${ARM_CLIENT_SECRET:-}" ]; then
+          echo "[ERROR] ARM_CLIENT_SECRET is set. Static credentials are prohibited." >&2; exit 2
+        fi
+        export ARM_USE_MSI="true"
+        export ARM_ENVIRONMENT="$[[ inputs.arm_environment ]]"
+        az cloud set --name "${ARM_ENVIRONMENT}"
+        az login --identity --output none
+
+        cd "${TF_ROOT}"
+        terraform init -reconfigure -backend-config="backend.${TF_ENV}.hcl"
+
+        # Always-run teardown. Registered BEFORE apply so a failed apply/assert still destroys.
+        # Captured TF_DIR makes the trap cwd-independent: the assertion step cd's away, so the
+        # trap must re-enter the terraform root before destroying.
+        TF_DIR="$(pwd)"
+        EPHEMERAL_UP=0
+        cleanup() {
+          CODE=$?
+          if [ "${EPHEMERAL_UP}" -eq 1 ]; then
+            echo "[INFO] (trap) Destroying ephemeral environment '${TF_ENV}' (exit was ${CODE})"
+            cd "${TF_DIR}" || { echo "[ERROR] (trap) cannot cd to ${TF_DIR}; cannot destroy" >&2; exit "${CODE}"; }
+            if terraform destroy -auto-approve -input=false -lock-timeout=300s; then
+              echo "[INFO] (trap) Ephemeral environment destroyed."
+            else
+              echo "[ERROR] (trap) terraform destroy FAILED — ephemeral resources may be orphaned in '${TF_ENV}'. Investigate." >&2
+            fi
+          fi
+          exit "${CODE}"
+        }
+        trap cleanup EXIT
+
+        echo "[INFO] Applying ephemeral environment '${TF_ENV}'"
+        terraform plan -input=false -lock-timeout=300s -out=ephemeral.tfplan
+        EPHEMERAL_UP=1
+        terraform apply -input=false -lock-timeout=300s ephemeral.tfplan
+
+        # Post-apply assertions run against the applied state, not just the plan.
+        # tf_test.py reads the live state (terraform show -json) when --post-apply is set.
+        echo "[INFO] Running post-apply assertions against the applied state"
+        cd - >/dev/null
+        python3 tf_test.py --tf-root "${TF_ROOT}" --spec "${SPEC_FILE}" \
+          --report-dir reports --post-apply
+
+        # Success path: the EXIT trap still runs and destroys the environment.
+        echo "[INFO] apply-ephemeral assertions complete; teardown runs on exit."
+      else
+        # --- Plan-mode assertions (default; no credentials needed) ---
+        python3 tf_test.py --tf-root "${TF_ROOT}" --spec "${SPEC_FILE}" --report-dir reports
+      fi
+  artifacts:
+    paths:
+      - reports/tftest-report.json
+    reports:
+      junit: reports/tftest-junit.xml
+    when: always
+  allow_failure: false

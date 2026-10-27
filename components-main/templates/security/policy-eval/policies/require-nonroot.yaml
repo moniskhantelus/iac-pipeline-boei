@@ -1,0 +1,33 @@
+apiVersion: kaas.boeing/policy-eval/v1
+kind: Policy
+metadata:
+  name: require-nonroot
+spec:
+  mode: Enforce
+  target: kubernetes
+  rules:
+    - name: pod-security-context-runasnonroot
+      match:
+        kinds: [Deployment, StatefulSet, DaemonSet]
+      validate:
+        message: "Pod securityContext must set runAsNonRoot: true and seccompProfile RuntimeDefault."
+        pattern:
+          spec:
+            template:
+              spec:
+                securityContext:
+                  runAsNonRoot: true
+                  seccompProfile:
+                    type: RuntimeDefault
+    - name: container-drop-all-caps-no-escalation
+      match:
+        kinds: [Deployment, StatefulSet, DaemonSet]
+      validate:
+        message: "Containers must drop ALL capabilities and disallow privilege escalation."
+        foreach:
+          list: spec.template.spec.containers
+          pattern:
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: "?*"

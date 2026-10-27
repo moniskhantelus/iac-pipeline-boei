@@ -1,0 +1,13 @@
+# Sample onboarding request (passing). Used by onboarding/readiness-check self-test.
+applicationId: p1234
+esatId: e5678
+team: alpha
+costCenter: cc99
+tier: 2
+archetype: gp-api
+supportGroup: sg-alpha
+attestations:
+  workloadIdentityCompatible: true
+  structuredLogging: true
+  dependenciesDocumented: true
+  supportContact: true

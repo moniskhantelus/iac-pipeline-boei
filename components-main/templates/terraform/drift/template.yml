@@ -1,0 +1,69 @@
+spec:
+  inputs:
+    job_name:
+      description: "CI job name."
+      default: tf-drift
+    stage:
+      description: "Stage this job runs in."
+      default: plan
+    environment:
+      description: "Environment to check for drift."
+      # required — no default
+    tf_root:
+      description: "Terraform root to check."
+      default: "."
+    alert_webhook:
+      description: "Platform ops webhook (Teams/Slack) consumed from a protected CI variable name."
+      default: "$DRIFT_ALERT_WEBHOOK"
+    terraform_image:
+      description: "Boeing-internal Terraform image."
+      default: "registry.web.boeing.com/amp/docker-images/terraform/terraform-azure/ubi8minimal-azterraform/v1.9.2"
+    terraform_image_version:
+      description: "Tag of the Terraform image."
+      default: "26.04.15"
+    arm_environment:
+      description: "Azure cloud for the azurerm provider."
+      default: "AzureUSGovernment"
+---
+
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: "$[[ inputs.terraform_image ]]:$[[ inputs.terraform_image_version ]]"
+  rules:
+    # Drift runs only on schedule (configure a 4-hour schedule per environment in the UI).
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: always
+    - when: never
+  variables:
+    TF_ROOT: "$[[ inputs.tf_root ]]"
+    TF_ENV: "$[[ inputs.environment ]]"
+  script:
+    - set -euo pipefail
+    - |
+      if [ -n "${ARM_CLIENT_SECRET:-}" ]; then
+        echo "[ERROR] ARM_CLIENT_SECRET is set. Static credentials are prohibited." >&2; exit 1
+      fi
+    - export ARM_USE_MSI="true"; export ARM_ENVIRONMENT="$[[ inputs.arm_environment ]]"
+    - az cloud set --name "${ARM_ENVIRONMENT}"
+    - az login --identity --output none
+    - cd "${TF_ROOT}"
+    - terraform init -reconfigure -backend-config="backend.${TF_ENV}.hcl"
+    - |
+      set +e
+      terraform plan -detailed-exitcode -input=false -out=drift.tfplan
+      CODE=$?
+      set -e
+      case "${CODE}" in
+        0) echo "[INFO] No drift in ${TF_ENV}." ;;
+        2) echo "[WARN] DRIFT DETECTED in ${TF_ENV}."
+           terraform show -no-color drift.tfplan | tee drift-report.txt
+           curl --silent --fail -X POST -H 'Content-Type: application/json' \
+             -d "{\"text\":\"KaaS drift detected in ${TF_ENV} (${CI_PROJECT_PATH}). Review pipeline ${CI_PIPELINE_URL}\"}" \
+             "$[[ inputs.alert_webhook ]]" || echo "[WARN] alert webhook failed"
+           exit 2 ;;
+        *) echo "[ERROR] terraform plan failed (exit ${CODE})"; exit 1 ;;
+      esac
+  artifacts:
+    paths: ["$[[ inputs.tf_root ]]/drift-report.txt"]
+    when: always
+  allow_failure: false

@@ -30,7 +30,21 @@ variable "state_storage_account_names" {
   type    = list(string)
   default = []
 }
-variable "runner_identity_principal_id" { type = string }
+variable "runner_identity_principal_id" {
+  type    = string
+  default = ""
+}
+# Additional APPLY runner identities; keys must be stable names such as dev/uat/prod.
+variable "runner_identity_principal_ids" {
+  type    = map(string)
+  default = {}
+}
+locals {
+  audit_writers = merge(
+    var.runner_identity_principal_id != "" ? { primary = var.runner_identity_principal_id } : {},
+    var.runner_identity_principal_ids
+  )
+}
 variable "reviewer_principal_id" { type = string }
 variable "runner_subnet_ids" { type = list(string) }
 # Subnet for the audit storage account's private endpoint NIC (REQ-INT-26).
@@ -108,24 +122,36 @@ resource "azurerm_storage_container" "audit" {
 resource "azurerm_storage_container_immutability_policy" "audit" {
   storage_container_resource_manager_id = azurerm_storage_container.audit.id
   immutability_period_in_days           = 730
-  locked                                = false # DRAFT: legal approval required; no lock automation.
-  protected_append_writes_enabled       = false
-  protected_append_writes_all_enabled   = false
-  lifecycle { prevent_destroy = true }
+  locked                                = var.lock_retention
+  # This guard records a reference, not legal approval itself; protect deployment permissions.
+  # Never set lock_retention=true until the authorized owner approves the irreversible action.
+  protected_append_writes_enabled     = false
+  protected_append_writes_all_enabled = false
+  lifecycle {
+    prevent_destroy = true
+    precondition {
+      condition     = !var.lock_retention || length(trimspace(var.legal_approval_reference)) > 0
+      error_message = "Locking retention requires the separately approved legal reference."
+    }
+  }
 }
 resource "azurerm_role_definition" "writer" {
   name  = "${var.storage_account_name}-audit-writer"
   scope = azurerm_resource_group.audit.id
   permissions {
-    actions      = []
-    data_actions = ["Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write"]
+    actions = []
+    data_actions = [
+      "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write",
+      "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read"
+    ]
   }
   assignable_scopes = [azurerm_resource_group.audit.id]
 }
 resource "azurerm_role_assignment" "writer" {
+  for_each           = local.audit_writers
   scope              = azurerm_storage_container.audit.id
   role_definition_id = azurerm_role_definition.writer.role_definition_resource_id
-  principal_id       = var.runner_identity_principal_id
+  principal_id       = each.value
 }
 resource "azurerm_role_assignment" "reader" {
   scope                = azurerm_storage_container.audit.id
@@ -136,3 +162,27 @@ output "audit_storage_account" { value = azurerm_storage_account.audit.name }
 output "audit_container" { value = azurerm_storage_container.audit.name }
 output "policy_id" { value = azurerm_storage_container_immutability_policy.audit.id }
 output "private_endpoint_id" { value = azurerm_private_endpoint.audit.id }
+
+# Default remains draft. A separate approved Terraform change may lock retention.
+variable "lock_retention" {
+  type    = bool
+  default = false
+}
+variable "legal_approval_reference" {
+  type    = string
+  default = ""
+}
+resource "azurerm_role_definition" "policy_reader" {
+  name  = "${var.storage_account_name}-policy-reader"
+  scope = azurerm_resource_group.audit.id
+  permissions {
+    actions = ["Microsoft.Storage/storageAccounts/blobServices/containers/immutabilityPolicies/read"]
+  }
+  assignable_scopes = [azurerm_resource_group.audit.id]
+}
+resource "azurerm_role_assignment" "policy_reader" {
+  for_each           = local.audit_writers
+  scope              = azurerm_storage_container.audit.id
+  role_definition_id = azurerm_role_definition.policy_reader.role_definition_resource_id
+  principal_id       = each.value
+}

@@ -1,0 +1,34 @@
+apiVersion: kaas.boeing/policy-eval/v1
+kind: Policy
+metadata:
+  name: approved-regions
+spec:
+  mode: Enforce
+  target: tfplan
+  rules:
+    - name: location-allowlist
+      match:
+        resource_types:
+          - azurerm_resource_group
+          - azurerm_kubernetes_cluster
+          - azurerm_storage_account
+      validate:
+        message: "Resources must be in an approved US Gov region (usgovvirginia|usgovtexas)."
+        attribute:
+          path: location
+          allowed:
+            - usgovvirginia
+            - usgovtexas
+    - name: required-tags
+      match:
+        resource_types:
+          - azurerm_resource_group
+          - azurerm_kubernetes_cluster
+      validate:
+        message: "Resources must carry the mandatory platform tags."
+        required_tags:
+          - environment
+          - managed-by
+          - cost-center
+          - application-id
+          - platform

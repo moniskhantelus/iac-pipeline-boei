@@ -1,0 +1,78 @@
+spec:
+  inputs:
+    job_name:
+      description: "CI job name. Allows the component to be included more than once."
+      default: infracost
+    stage:
+      description: "Stage this job runs in. Consumer must declare it in its stages list."
+      default: finops
+    plan_json:
+      description: "Path to the Terraform plan JSON produced by terraform/plan (plan.tfplan.json)."
+      default: "plan.tfplan.json"
+    tf_root:
+      description: "Terraform root containing the plan JSON."
+      default: "."
+    currency:
+      description: "Display currency for the cost output."
+      default: "USD"
+    infracost_skip:
+      description: >-
+        'Y' skips the cost step (no image pull, no run). Defaults to 'Y' because the internal
+        Infracost mirror is not yet confirmed available (STR-225 fallback). Set to 'N' once the
+        mirror is onboarded so cost estimation runs.
+      default: "Y"
+    infracost_image:
+      description: "Boeing-internal Infracost image (mirrored from Docker Hub). No Docker Hub, no :latest."
+      default: "registry.web.boeing.com/ecs-catalog/infracost/infracost"
+    infracost_image_version:
+      description: "Pinned Infracost version tag (never latest)."
+      default: "v0.10.39"
+  component:
+    - name
+    - version
+---
+
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  # STR-225 / PRD REQ-SVC-13: image is the Boeing-internal mirror at a PINNED tag — never Docker Hub,
+  # never :latest. This brings the last pipeline image into supply-chain alignment with the rest.
+  image: "$[[ inputs.infracost_image ]]:$[[ inputs.infracost_image_version ]]"
+  variables:
+    PLAN_JSON: "$[[ inputs.plan_json ]]"
+    TF_ROOT: "$[[ inputs.tf_root ]]"
+    CURRENCY: "$[[ inputs.currency ]]"
+    SKIP: "$[[ inputs.infracost_skip ]]"
+    # INFRACOST_API_KEY must be a masked/protected CI variable in the consumer project (never embedded).
+  needs:
+    - job: tf-plan
+      artifacts: true
+      optional: true
+  script:
+    - set -euo pipefail
+    # STR-225 fallback (AC 4): default-skip until the internal mirror is established. The step is
+    # DISABLED by default so the pipeline keeps working instead of failing on an unreachable
+    # external registry. Re-enable by setting infracost_skip: "N" once the mirror is onboarded.
+    # Tracking ticket: STR-225 ("Source Cost Estimation Tool from Internal Registry").
+    - |
+      if [ "${SKIP}" = "Y" ]; then
+        echo "[WARN] Infracost cost estimation is SKIPPED by default (infracost_skip=Y)."
+        echo "[WARN] Reason: the internal mirror registry.web.boeing.com/ecs-catalog/infracost/infracost"
+        echo "[WARN] is not yet confirmed onboarded. Set infracost_skip to N once it is. Tracking: STR-225."
+        exit 0
+      fi
+    - cd "${TF_ROOT}"
+    - |
+      if [ ! -f "${PLAN_JSON}" ]; then
+        echo "[ERROR] ${PLAN_JSON} not found. This component consumes the terraform/plan JSON artifact." >&2
+        exit 1
+      fi
+    - infracost breakdown --path "${PLAN_JSON}" --currency "${CURRENCY}" --format table | tee infracost-breakdown.txt
+    - infracost breakdown --path "${PLAN_JSON}" --currency "${CURRENCY}" --format json --out-file infracost.json
+  artifacts:
+    name: "infracost-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - "$[[ inputs.tf_root ]]/infracost-breakdown.txt"
+      - "$[[ inputs.tf_root ]]/infracost.json"
+    when: always
+  # Cost estimation is advisory; it must never block the pipeline.
+  allow_failure: true

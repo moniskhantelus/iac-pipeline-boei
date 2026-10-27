@@ -1,0 +1,59 @@
+{
+  "format_version": "1.2",
+  "planned_values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "azurerm_resource_group.bad",
+          "type": "azurerm_resource_group",
+          "name": "bad",
+          "values": {
+            "name": "badrg",
+            "location": "eastus",
+            "tags": {
+              "environment": "dev"
+            }
+          }
+        },
+        {
+          "address": "azurerm_kubernetes_cluster.bad",
+          "type": "azurerm_kubernetes_cluster",
+          "name": "bad",
+          "values": {
+            "name": "badaks",
+            "location": "eastus",
+            "private_cluster_enabled": false,
+            "tags": {
+              "environment": "dev"
+            }
+          }
+        },
+        {
+          "address": "azurerm_storage_account.bad",
+          "type": "azurerm_storage_account",
+          "name": "bad",
+          "values": {
+            "name": "badsa",
+            "location": "eastus",
+            "min_tls_version": "TLS1_0",
+            "blob_properties": [
+              {
+                "versioning_enabled": false
+              }
+            ]
+          }
+        },
+        {
+          "address": "azurerm_key_vault.bad",
+          "type": "azurerm_key_vault",
+          "name": "bad",
+          "values": {
+            "name": "badkv",
+            "location": "eastus",
+            "purge_protection_enabled": false
+          }
+        }
+      ]
+    }
+  }
+}

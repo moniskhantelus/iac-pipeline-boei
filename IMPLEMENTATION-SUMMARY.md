@@ -1,3 +1,5 @@
+> SUPERSEDED: see FIXES-AND-DEPLOYMENT.md for the corrected implementation and remaining acceptance steps.
+
 # STR-230 delivery summary
 
 Implemented in the actual nested pipeline repository from the uploaded ZIP.

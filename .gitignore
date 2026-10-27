@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.terraform/
+*.tfstate
+*.tfstate.*
+control-evidence/
+control-config.json

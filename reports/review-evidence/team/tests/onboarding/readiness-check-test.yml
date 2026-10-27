@@ -1,0 +1,9 @@
+# Self-test: the passing onboarding fixture must pass readiness-check.
+include:
+  - local: templates/onboarding/readiness-check/template.yml   # LOCAL (not catalog @SHA) — resolves on any branch, no catalog release needed (STR-299)
+    inputs:
+      job_name: test-readiness-pass
+      stage: test
+      request_file: tests/fixtures/onboarding/onboarding.yaml
+      app_dir: tests/fixtures/onboarding
+      manifest_dir: tests/fixtures/manifests-pass

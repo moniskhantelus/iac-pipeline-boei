@@ -16,7 +16,7 @@ iac_coverity_job:
   image: ${COVERITY_IMAGE}:${COVERITY_IMAGE_VERSION}
 
   variables:
-    GIT_SSL_NO_VERIFY: "true"
+    GIT_SSL_NO_VERIFY: "false"
     # COVERITY_SERVER_URL: Coverity Connect server URL
     # Set as CI/CD variable in GitLab project settings
     COVERITY_SERVER_URL: ""

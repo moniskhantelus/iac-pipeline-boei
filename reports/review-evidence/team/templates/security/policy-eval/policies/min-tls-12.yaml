@@ -1,0 +1,21 @@
+# STR-228 POLICY-7: All endpoints must enforce TLS 1.2 as the minimum version.
+apiVersion: kaas.boeing/policy-eval/v1
+kind: Policy
+metadata:
+  name: min-tls-12
+spec:
+  mode: Enforce
+  target: tfplan
+  rules:
+    - name: storage-min-tls-12
+      match:
+        resource_types:
+          - azurerm_storage_account
+      validate:
+        message: "min_tls_version must be TLS1_2."
+        attribute:
+          path: min_tls_version
+          # Absent defaults (older azurerm) could allow TLS1_0; treat missing as a violation.
+          default: "TLS1_0"
+          allowed:
+            - "TLS1_2"

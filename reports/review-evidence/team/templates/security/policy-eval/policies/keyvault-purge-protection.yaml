@@ -1,0 +1,22 @@
+# STR-228 POLICY-6: Key Vaults must have purge protection enabled.
+apiVersion: kaas.boeing/policy-eval/v1
+kind: Policy
+metadata:
+  name: keyvault-purge-protection
+spec:
+  mode: Enforce
+  target: tfplan
+  rules:
+    - name: keyvault-purge-protection-enabled
+      match:
+        resource_types:
+          - azurerm_key_vault
+      validate:
+        message: "Key Vaults must set purge_protection_enabled = true."
+        deny:
+          conditions:
+            # purge_protection_enabled defaults to false when absent -> treat missing as violation.
+            - key: purge_protection_enabled
+              operator: Equals
+              value: false
+              default: false
