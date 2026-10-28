@@ -5,7 +5,24 @@
       "when": "always"
     -
       "when": "never"
+# Consume the team's existing release unchanged. Pipeline-owned jobs included below
+# override the affected job logic/needs; no component release or source change is required.
 "include":
+  - component: $CI_SERVER_FQDN/kaas/pipelines/components/compliance-gates/terraform-gate@0.1.2
+    inputs:
+      job_name: iac_gates_job
+      stage: iac_approval
+      environment: $CONTROL_ENV
+  - component: $CI_SERVER_FQDN/kaas/pipelines/components/compliance-gates/audit-record@0.1.2
+    inputs:
+      job_name: iac_audit_record
+      stage: iac_audit
+      environment: $CONTROL_ENV
+      module: $CI_PROJECT_NAME
+      apply_job: iac_apply_job
+      plan_job: iac_init_job
+      tf_root: control-evidence
+      audit_storage_account: $AUDIT_STORAGE_ACCOUNT
   -
     "local": "/variables/.variables.yml"
   -

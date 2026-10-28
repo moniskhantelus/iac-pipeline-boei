@@ -48,8 +48,13 @@ test_complete_attempt_has_no_reconciliation_alert (test_operations.Operations.te
 test_unresolved_intent_is_reported_unknown (test_operations.Operations.test_unresolved_intent_is_reported_unknown) ... ok
 test_worm_verifier_does_not_accept_authorization_error (test_operations.Operations.test_worm_verifier_does_not_accept_authorization_error) ... ok
 test_worm_verifier_rejects_unlocked_container_without_writing (test_operations.Operations.test_worm_verifier_rejects_unlocked_container_without_writing) ... ok
+test_apply_depends_on_gate_and_plan_in_consumer (test_pipeline_contract.PipelineContract.test_apply_depends_on_gate_and_plan_in_consumer) ... ok
+test_component_defects_are_patched_in_consumer_not_archive (test_pipeline_contract.PipelineContract.test_component_defects_are_patched_in_consumer_not_archive) ... ok
+test_no_modified_components_library_is_shipped (test_pipeline_contract.PipelineContract.test_no_modified_components_library_is_shipped) ... ok
+test_supplied_components_archive_is_unchanged (test_pipeline_contract.PipelineContract.test_supplied_components_archive_is_unchanged) ... ok
+test_team_release_is_included_before_consumer_overrides (test_pipeline_contract.PipelineContract.test_team_release_is_included_before_consumer_overrides) ... ok
 
 ----------------------------------------------------------------------
-Ran 50 tests in 3.430s
+Ran 55 tests in 3.271s
 
 OK

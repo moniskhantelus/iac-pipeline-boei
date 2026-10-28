@@ -1,11 +1,12 @@
-# Validation recorded October 27, 2026
+# Validation: pipeline-only scope
 
-- 50 Python behavioral/command-flow tests passed in each corrected repository. See test-results.txt. External Azure/Terraform commands in the command-flow tests are local fakes; no cloud changes were made.
-- 79 YAML files parsed locally; generated script entries are strings, apply needs both plan and gate with no optional dependency, plan jobs use separate runner tags, and local workflow include targets exist.
-- Six component runtime copies and seven pipeline runtime copies match their canonical source. The pipeline and component canonical runtimes are byte-identical.
-- Python runtime files compile. Terraform formatting check passed for shared-services/audit/main.tf.
-- Provider initialization could not complete: registry.terraform.io DNS was unavailable. Full Terraform provider schema validation is NOT claimed.
-- Private GitLab merged CI lint, actual rules/DAG/manual scheduling, real API/auth behavior, deployed Azure identities/network/RBAC, live apply/destroy, WORM negative tests and cancellation/reconciliation acceptance are NOT verified.
-- No resources were deployed, no policy was locked, no code was pushed and no external monitoring schedule was created.
+The branch changes iac-pipeline-boei only. The original components-main.zip is unchanged; its SHA-256 is 0ae47a2256c7207b1b54971d19351574314751c5de4f82fae15a2d6293fe5d6e.
 
-Run the setup and acceptance steps in FIXES-AND-DEPLOYMENT.md before production use. This is a breaking component-interface migration, including protected target configuration, separate plan/apply identities, environment-scoped approval credentials and removal of unaudited ephemeral mutation.
+- The 50 existing pipeline behavioral/command-flow tests cover environment mismatch, independent reviewers, MR/commit binding, API failures, saved-plan integrity, actual exit codes, immutable intent/delivery/replay behavior and recovery helpers. Local command-flow commands use fakes.
+- Additional integration tests check the original ZIP digest, existing component references and pipeline-owned job overrides without loading modified component source.
+- Seven embedded pipeline runtime copies are checked against runtime/control.py.
+- Local YAML parsing/merge checks validate script strings, required plan/gate dependencies, override precedence and include paths. This is not GitLab server CI lint.
+- Terraform formatting was checked. Provider initialization remains unverified because registry.terraform.io DNS was unavailable on this host.
+- Private GitLab API/catalog behavior, real Azure identity/RBAC/networking, deployment outcomes, locked WORM negative tests and independent monitoring remain live acceptance requirements.
+
+No team component source/release was changed. The earlier dual-repository fix proposal is superseded. See FIXES-AND-DEPLOYMENT.md for the pipeline integration contract and prerequisites.
