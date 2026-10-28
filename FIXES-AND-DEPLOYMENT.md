@@ -44,7 +44,7 @@ Plan and apply output are actually written under `control-evidence/`, retained f
 
 Each actual apply or destroy attempt writes a unique immutable `intent.json` **before Terraform init/apply**. An unavailable audit store at that point blocks mutation. A handled successful or failed command writes `result.json` with the actual exit code and log hash, then the queryable 11-field `audit.json`. Audit failure after mutation fails the job; it does not claim infrastructure rolled back.
 
-Writes are conditional block-blob creates (`if-none-match=*`, `overwrite=false`). A lost successful upload response is reconciled by downloading and comparing existing bytes. Different bytes cannot replace the original. Local terminal evidence remains an artifact for recovery.
+Writes are conditional block-blob creates (`if-none-match=*`, `overwrite=false`). A lost successful upload response is reconciled by downloading and comparing existing bytes. Different bytes cannot replace the original. Local terminal evidence remains an artifact for recovery. Delivery and replay validate the record against the real exit code, apply-log hash, job/attempt identity and project/pipeline storage path. Missing terminal evidence fails delivery rather than returning success.
 
 Use an authorized identity in the correct Azure cloud to replay trusted terminal evidence without rerunning Terraform:
 

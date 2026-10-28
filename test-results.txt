@@ -1,9 +1,12 @@
+test_delivery_rejects_success_claim_after_failed_apply (test_command_flow.CommandFlow.test_delivery_rejects_success_claim_after_failed_apply) ... ok
 test_destroy_cannot_run_without_enable (test_command_flow.CommandFlow.test_destroy_cannot_run_without_enable) ... ok
 test_failed_apply_still_persists_failure (test_command_flow.CommandFlow.test_failed_apply_still_persists_failure) ... ok
 test_full_success_plan_gate_apply_and_idempotent_delivery (test_command_flow.CommandFlow.test_full_success_plan_gate_apply_and_idempotent_delivery) ... ok
+test_missing_terminal_delivery_fails_instead_of_reporting_success (test_command_flow.CommandFlow.test_missing_terminal_delivery_fails_instead_of_reporting_success) ... ok
 test_modified_plan_never_calls_apply (test_command_flow.CommandFlow.test_modified_plan_never_calls_apply) ... ok
 test_ambiguous_mapping_blocks (test_control.Controls.test_ambiguous_mapping_blocks) ... ok
 test_api_failure_logs_block (test_control.Controls.test_api_failure_logs_block) ... ok
+test_api_null_approvals_blocks (test_control.Controls.test_api_null_approvals_blocks) ... ok
 test_approval_reset_must_be_enabled (test_control.Controls.test_approval_reset_must_be_enabled) ... ok
 test_audit_intent_failure_prevents_mutation (test_control.Controls.test_audit_intent_failure_prevents_mutation) ... ok
 test_author_inactive_bot_and_unlisted_do_not_count (test_control.Controls.test_author_inactive_bot_and_unlisted_do_not_count) ... ok
@@ -27,6 +30,7 @@ test_plan_tampering_blocks (test_control.Controls.test_plan_tampering_blocks) ..
 test_prod_accepts_two_independent_reviewers (test_control.Controls.test_prod_accepts_two_independent_reviewers) ... ok
 test_prod_one_blocks (test_control.Controls.test_prod_one_blocks) ... ok
 test_production_unlocked_policy_blocks (test_control.Controls.test_production_unlocked_policy_blocks) ... ok
+test_query_environment_module_actor_and_date_filters (test_control.Controls.test_query_environment_module_actor_and_date_filters) ... ok
 test_query_rejects_nonobject_and_missing_fields (test_control.Controls.test_query_rejects_nonobject_and_missing_fields) ... ok
 test_query_requests_all_azure_pages (test_control.Controls.test_query_requests_all_azure_pages) ... ok
 test_redirect_cannot_forward_api_token (test_control.Controls.test_redirect_cannot_forward_api_token) ... ok
@@ -36,6 +40,12 @@ test_setup_failure_has_terminal_failure (test_control.Controls.test_setup_failur
 test_state_account_reuse_blocks (test_control.Controls.test_state_account_reuse_blocks) ... ok
 test_static_credential_blocks_login (test_control.Controls.test_static_credential_blocks_login) ... ok
 test_success_failure_and_misleading_output_use_real_exit_code (test_control.Controls.test_success_failure_and_misleading_output_use_real_exit_code) ... ok
+test_terminal_record_validates_success_and_failure (test_control.Controls.test_terminal_record_validates_success_and_failure) ... ok
+test_terminal_rejects_boolean_and_string_exit_codes (test_control.Controls.test_terminal_rejects_boolean_and_string_exit_codes) ... ok
+test_terminal_rejects_changed_apply_log (test_control.Controls.test_terminal_rejects_changed_apply_log) ... ok
+test_terminal_rejects_invalid_date (test_control.Controls.test_terminal_rejects_invalid_date) ... ok
+test_terminal_rejects_outcome_exit_code_mismatch (test_control.Controls.test_terminal_rejects_outcome_exit_code_mismatch) ... ok
+test_terminal_rejects_wrong_project_pipeline_and_attempt_paths (test_control.Controls.test_terminal_rejects_wrong_project_pipeline_and_attempt_paths) ... ok
 test_terminal_upload_failure_retains_replay_artifact (test_control.Controls.test_terminal_upload_failure_retains_replay_artifact) ... ok
 test_uat_accepts_one (test_control.Controls.test_uat_accepts_one) ... ok
 test_uat_zero_blocks (test_control.Controls.test_uat_zero_blocks) ... ok
@@ -55,6 +65,6 @@ test_supplied_components_archive_is_unchanged (test_pipeline_contract.PipelineCo
 test_team_release_is_included_before_consumer_overrides (test_pipeline_contract.PipelineContract.test_team_release_is_included_before_consumer_overrides) ... ok
 
 ----------------------------------------------------------------------
-Ran 55 tests in 3.271s
+Ran 65 tests in 7.704s
 
 OK

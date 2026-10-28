@@ -77,6 +77,17 @@ class CommandFlow(unittest.TestCase):
   self.invoke('apply',1)
   calls=(self.base/'calls.jsonl').read_text()
   self.assertNotIn('["terraform", "apply"',calls)
+ def test_missing_terminal_delivery_fails_instead_of_reporting_success(self):
+  self.invoke('deliver',1)
+  self.assertFalse((self.base/'calls.jsonl').exists())
+ def test_delivery_rejects_success_claim_after_failed_apply(self):
+  self.prepare();self.env['FAKE_APPLY_RC']='7';self.invoke('apply',7)
+  result_path=self.base/'control-evidence/result.json';audit_path=self.base/'control-evidence/audit.json'
+  result=json.loads(result_path.read_text());result['record']['outcome']='success'
+  result_path.write_text(json.dumps(result));audit_path.write_text(json.dumps(result['record']))
+  before=(self.base/'calls.jsonl').read_text()
+  self.invoke('deliver',1)
+  self.assertEqual((self.base/'calls.jsonl').read_text(),before)
  def test_destroy_cannot_run_without_enable(self):
   result=subprocess.run([sys.executable,str(ROOT/'runtime/control.py'),'plan','--operation','destroy'],cwd=self.base,env=self.env,capture_output=True,text=True)
   self.assertEqual(result.returncode,1);self.assertFalse((self.base/'calls.jsonl').exists())

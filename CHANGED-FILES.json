@@ -1,5 +1,5 @@
 {
-  "scope": "iac-pipeline-boei only; components-main.zip unchanged; original team source in reports is evidence only",
+  "scope": "STR-222 and STR-230 implemented in iac-pipeline-boei only; original team components unchanged",
   "changes": [
     {
       "path": ".gitignore",
@@ -39,6 +39,10 @@
     },
     {
       "path": "control-config.example.json",
+      "status": "A"
+    },
+    {
+      "path": "docs/STR-222-STR-230-implementation.md",
       "status": "A"
     },
     {

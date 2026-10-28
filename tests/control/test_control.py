@@ -212,6 +212,44 @@ class Controls(unittest.TestCase):
     def test_plan_refuses_approval_token(self):
         cfg,target=c.config()
         with self.assertRaisesRegex(c.Blocked,'approval API credential'):c.plan_command(cfg,target,'apply')
+    def terminal_fixture(self, rc=0):
+        base=c.paths(); log=base/'apply.log';log.write_text('actual apply transcript')
+        record=dict(actor='actor',commit_sha='a'*40,plan_hash='b'*64,timestamp='2026-10-28T01:02:03Z',environment='prod',module='network',outcome='success' if rc==0 else 'failure',pipeline_id='100',job_id='200',project_path='group/project',mr_ref='7')
+        attempt='200-'+'c'*32
+        result=dict(kind='result',record=record,exit_code=rc,operation='apply',apply_log_hash=c.sha(log),attempt=attempt,blob_prefix='prod/network/2026/10/28/42/100/'+attempt)
+        return result,record,log
+    def test_terminal_record_validates_success_and_failure(self):
+        for rc in (0,1,42):
+            result,record,log=self.terminal_fixture(rc)
+            c.validate_terminal(result,record,log,'42')
+    def test_terminal_rejects_outcome_exit_code_mismatch(self):
+        result,record,log=self.terminal_fixture(42);record['outcome']='success'
+        with self.assertRaisesRegex(c.Blocked,'exit code'):c.validate_terminal(result,record,log,'42')
+    def test_terminal_rejects_boolean_and_string_exit_codes(self):
+        for rc in (True,'0',None):
+            result,record,log=self.terminal_fixture();result['exit_code']=rc
+            with self.assertRaises(c.Blocked):c.validate_terminal(result,record,log,'42')
+    def test_terminal_rejects_changed_apply_log(self):
+        result,record,log=self.terminal_fixture();log.write_text('modified transcript')
+        with self.assertRaisesRegex(c.Blocked,'hash mismatch'):c.validate_terminal(result,record,log,'42')
+    def test_terminal_rejects_wrong_project_pipeline_and_attempt_paths(self):
+        for source,replacement in [('/42/','/99/'),('/100/','/101/'),('200-','201-')]:
+            result,record,log=self.terminal_fixture();result['blob_prefix']=result['blob_prefix'].replace(source,replacement)
+            with self.assertRaises(c.Blocked):c.validate_terminal(result,record,log,'42')
+    def test_terminal_rejects_invalid_date(self):
+        result,record,log=self.terminal_fixture();result['blob_prefix']=result['blob_prefix'].replace('/10/','/99/')
+        with self.assertRaisesRegex(c.Blocked,'path date'):c.validate_terminal(result,record,log,'42')
+    def test_query_environment_module_actor_and_date_filters(self):
+        record={'environment':'prod','module':'network','actor':'reviewer','timestamp':'2026-10-28T12:00:00Z'}
+        filters=dict(environment='prod',module='network',actor='reviewer',outcome=None)
+        args=type('Args',(),filters)()
+        self.assertTrue(q._matches(record,args,q._parse_date('2026-10-28'),q._parse_date('2026-10-28')))
+        for field in ('environment','module','actor'):
+            mismatch=type('Args',(),filters|{field:'other'})()
+            self.assertFalse(q._matches(record,mismatch,None,None))
+    def test_api_null_approvals_blocks(self):
+        self.approvers=None
+        with self.assertRaisesRegex(c.Blocked,'approved_by'):self.approve()
     def test_static_credential_blocks_login(self):
         cfg,target=c.config();os.environ['ARM_CLIENT_SECRET']='not-real'
         with self.assertRaises(c.Blocked):c.login(cfg,target)

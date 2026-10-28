@@ -15,10 +15,8 @@ def main():
     base = Path(args.evidence)
     result = control.read(base / 'result.json')
     record = control.read(base / 'audit.json')
-    control.validate_record(record)
-    control.require(result['record'] == record and record['job_id'] == args.expected_job_id, 'Evidence/job identity mismatch')
-    control.require(record['outcome'] == ('success' if result['exit_code'] == 0 else 'failure'), 'Outcome/exit code mismatch')
-    control.require(control.sha(base / 'apply.log') == result['apply_log_hash'], 'Apply log hash mismatch')
+    control.validate_terminal(result, record, base / 'apply.log', cfg['project_id'])
+    control.require(record['job_id'] == args.expected_job_id, 'Evidence/job identity mismatch')
     target = dict(cfg['environments'][record['environment']], environment=record['environment'])
     control.storage_check(cfg, target)  # Requires existing approved az login in the correct cloud.
     prefix = result['blob_prefix']

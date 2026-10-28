@@ -334,6 +334,30 @@
           require(record['environment'] in ('dev', 'sandbox', 'uat', 'prod'), 'Invalid audit environment')
           dt.datetime.strptime(record['timestamp'], '%Y-%m-%dT%H:%M:%SZ')
       
+      def validate_terminal(result, record, log_path, project_id):
+          """Verify terminal evidence before delivery/replay; missing evidence never means success."""
+          require(isinstance(result, dict) and result.get('kind') == 'result', 'Invalid terminal result envelope')
+          validate_record(record)
+          require(result.get('record') == record, 'Audit and result records differ')
+          require(type(result.get('exit_code')) is int, 'Terminal exit code must be an integer')
+          expected = 'success' if result['exit_code'] == 0 else 'failure'
+          require(record['outcome'] == expected, 'Outcome does not match actual apply exit code')
+          require(result.get('operation') in ('apply', 'destroy'), 'Invalid terminal operation')
+          require(Path(log_path).is_file(), 'Apply log is missing from terminal evidence')
+          require(result.get('apply_log_hash') == sha(log_path), 'Apply log hash mismatch')
+          attempt = result.get('attempt')
+          require(isinstance(attempt, str) and re.fullmatch(re.escape(record['job_id']) + r'-[0-9a-f]{32}', attempt) is not None,
+                  'Terminal attempt does not match the apply job')
+          prefix = result.get('blob_prefix')
+          require(isinstance(prefix, str), 'Missing audit blob prefix')
+          parts = prefix.split('/')
+          require(len(parts) == 8 and parts[:2] == [record['environment'], record['module']]
+                  and parts[5:] == [str(project_id), record['pipeline_id'], attempt], 'Audit path is not bound to this apply attempt')
+          try:
+              dt.datetime.strptime('/'.join(parts[2:5]), '%Y/%m/%d')
+          except ValueError:
+              raise Blocked('Invalid audit path date') from None
+      
       def apply_command(cfg, target, operation):
           base = paths(); log = base / 'apply.log'; log.touch()
           manifest = bound_plan(cfg, target, operation)
@@ -384,19 +408,17 @@
                   require(os.environ.get('CONTROL_DESTROY_ENABLED') == 'true', 'Destroy is disabled')
               if args.command == 'deliver':
                   result_path = paths() / 'result.json'
-                  if not result_path.exists():
-                      print('No terminal artifact: apply did not run or was interrupted; inspect durable intents with reconcile.py')
-                      return 0
+                  require(result_path.is_file(), 'Terminal apply evidence is missing; inspect durable intents with reconcile.py. Delivery cannot report success.')
                   result = read(result_path)
-                  validate_record(result['record'])
+                  audit_path = paths() / 'audit.json'
+                  require(audit_path.is_file(), 'Queryable audit record is missing from terminal evidence')
+                  validate_terminal(result, read(audit_path), paths() / 'apply.log', cfg['project_id'])
                   require(result['record']['pipeline_id'] == os.environ['CI_PIPELINE_ID']
                           and result['record']['commit_sha'] == os.environ['CI_COMMIT_SHA']
                           and result['record']['environment'] == target['environment'], 'Result belongs to another deployment')
                   login(cfg, target)
                   storage_check(cfg, target)
                   upload(cfg, result_path, result['blob_prefix'] + '/result.json')
-                  audit_path = paths() / 'audit.json'
-                  require(read(audit_path) == result['record'], 'Audit and result records differ')
                   upload(cfg, audit_path, result['blob_prefix'] + '/audit.json')
               elif args.command == 'plan':
                   plan_command(cfg, target, args.operation)

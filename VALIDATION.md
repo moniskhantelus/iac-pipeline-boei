@@ -10,3 +10,5 @@ The branch changes iac-pipeline-boei only. The original components-main.zip is u
 - Private GitLab API/catalog behavior, real Azure identity/RBAC/networking, deployment outcomes, locked WORM negative tests and independent monitoring remain live acceptance requirements.
 
 No team component source/release was changed. The earlier dual-repository fix proposal is superseded. See FIXES-AND-DEPLOYMENT.md for the pipeline integration contract and prerequisites.
+
+Additional story-completion checks cover missing terminal evidence, exit-code/outcome disagreement, altered logs, cross-project/pipeline/job paths, malformed dates and combined query filters. See test-results.txt for the final suite count and docs/STR-222-STR-230-implementation.md for acceptance traceability.
