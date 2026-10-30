@@ -1,0 +1,160 @@
+# =============================================================================
+# GitLab CI/CD Global Variables
+# Purpose: Centralized configuration for all pipeline jobs.
+#          Override any variable per project in GitLab Settings → CI/CD → Variables.
+# =============================================================================
+
+variables:
+
+  # ---------------------------------------------------------------------------
+  # Terraform
+  # ---------------------------------------------------------------------------
+  TERRAFORM_IMAGE: "registry.web.boeing.com/amp/docker-images/terraform/terraform-azure/ubi8minimal-azterraform/v1.9.2"
+  TERRAFORM_IMAGE_VERSION: "26.04.15"
+  #TERRAFORM_IMAGE: "registry.web.boeing.com/ecs-catalog/docker-images/terraform-cloud-cli/v1/azure-v2" 
+  #TERRAFORM_IMAGE_VERSION: "1.5.0"
+  TERRAFORM_DEBUG_ENABLE: "N"               # Set Y to enable TF_LOG=DEBUG
+  TERRAFORM_VARIABLE_ENABLE: "N"            # Set Y to use branch-specific .tfvars
+  TERRAFORM_DESTROY_ENABLE: "N"             # Set Y to allow terraform destroy (dangerous)
+  TERRAFORM_GRAPH_ENABLE: "N"               # Set Y to generate resource dependency graph
+
+  TFLINT_SCAN_EXAMPLES_INCLUDE: "Y"
+
+  
+
+  # ---------------------------------------------------------------------------
+  # Azure Authentication & Backend
+  # ---------------------------------------------------------------------------
+  # Environment-specific variables follow the naming pattern:
+  #   AZ_<branch_prefix>_SUBSCRIPTION_ID
+  #   AZ_<branch_prefix>_SP_CLIENT_ID
+  #   AZ_<branch_prefix>_SP_CLIENT_SECRET   (masked, protected)
+  #   AZ_<branch_prefix>_TENANT_ID
+  #   AZ_<branch_prefix>_ST_ACCESS_KEY      (masked, protected)
+  # These MUST be set in GitLab CI/CD settings per project — never hardcode here.
+
+  AZ_TYPE_ENVIRONMENT: "AzureUSGovernment"   # AzureCloud | AzureUSGovernment | AzureChinaCloud
+  AZ_LOGIN_CSP_TYPE: "AzureUSGovernment"     # az cloud set --name value (Gov: SP + backend are usgovernment)
+  AZ_TF_BACKEND_RG: ""                       # Resource group for Terraform state storage
+  AZ_TF_BACKEND_SA: ""                       # Storage account for Terraform state
+
+  # ---------------------------------------------------------------------------
+  # Audit record (WORM) — STR-230
+  # Implemented by the in-repo runtime scripts/audit.py, embedded via iac/.audit_runtime.yml
+  # (included from template-workflow/.iac_module_template.yml) and run by the apply AND destroy
+  # jobs (`audit.py apply|destroy`, plus an after_script `finalize`). It writes the immutable
+  # audit record (schema documented in the scripts/audit.py docstring) after every apply/destroy,
+  # outcome from the terraform exit code, no-overwrite upload. It CONSUMES the WORM account by name.
+  #
+  # AUDIT_STORAGE_ACCOUNT: the dedicated WORM account (provisioned separately via
+  # shared-services/audit, NOT by this pipeline). The runtime consumes it by name.
+  # TODO(STR-230, before merge): a dedicated audit storage account is REQUIRED; the value
+  # below must be replaced (see B6 note).
+  #
+  # ⚠ B6 (gap analysis): the value below is the sandbox Terraform STATE account and is a
+  # TEST VALUE ONLY. The audit store MUST be a dedicated account SEPARATE from every state
+  # account — writing audit records to the state account proves neither separation nor WORM.
+  # Before merge: set this (as a protected per-project CI variable) to the shared-services
+  # audit account output (shared-services/audit output `audit_storage_account`), which must
+  # differ from AZ_TF_BACKEND_SA / kaastfs<env>00sa.
+  AUDIT_STORAGE_ACCOUNT: "kaastfssandbox00sa"  # TEST VALUE — state account; replace before merge (B6)
+  AUDIT_CONTAINER: "audit"                     # blob container for audit records (used by scripts/audit.py)
+  # N = reuse the Terraform SP session for the upload (tested path; no managed identity needed).
+  # Y = use a runner managed identity (production path; requires MI on the runner).
+  # In prod, N prints a WARNING; set AUDIT_REQUIRE_MI: "Y" to make SP mode a hard failure in prod.
+  AUDIT_USE_MANAGED_IDENTITY: "N"
+  # Fail closed if the audit container has no immutability (WORM) policy. Sandbox test on
+  # 2026-10-29 proved an unprotected container allows overwrite + delete; keep this "Y".
+  AUDIT_VERIFY_IMMUTABILITY: "Y"
+  AUDIT_RESOURCE_GROUP: "kaas-tfstate-mgmt-rg"  # RG of AUDIT_STORAGE_ACCOUNT (TEST VALUE; replace with audit RG before merge)
+  # Subscription holding AUDIT_STORAGE_ACCOUNT (state/audit sub, not the deploy sub). Used only
+  # for the immutability-policy check (--subscription); does not change the Terraform session.
+  AUDIT_SUBSCRIPTION_ID: "47940328-bbc5-4070-aa25-e8d4242280a4"  # TEST VALUE; replace before merge
+  # DEPLOY_ENV (declared with STR-222 below) is the record's environment (via AUDIT_ENVIRONMENT
+  # in the apply/destroy jobs). Optional: AUDIT_VERIFY_IMMUTABILITY ("Y" = refuse upload when the
+  # container has no immutability policy), CHANGE_TICKET, TF_ROOT, AUDIT_REPORT_DIR.
+
+  # ---------------------------------------------------------------------------
+  # STR-222 Environment-Specific Approval Gate
+  # Implemented by the in-repo template templates/terraform-gate/template.yml (scripts/gate.py
+  # embedded), included from template-workflow/.iac_module_template.yml. It handles all gate
+  # logic (sandbox/dev auto, uat >=1 approval, prod >=2 + change ticket, fail-closed,
+  # gate-decision.json) and takes its settings as template INPUTS (environment, chg_pattern,
+  # min_approvals_*), not CI variables.
+  # GATE_API_TOKEN: NOT defined here. Set it per project/group as a masked + protected CI
+  # variable (project/group access token with read_api); CI_JOB_TOKEN gets 401 on the MR API.
+  #
+  # DEPLOY_ENV feeds the required `environment` input (sandbox|dev|uat|prod).
+  # It is set per branch by workflow:rules in template-workflow/.iac_module_template.yml
+  # (workflow rule variables override this default). Empty here only as a fallback.
+  DEPLOY_ENV: ""
+
+  # ---------------------------------------------------------------------------
+  # Gitleaks (SAD - Sensitive Authentication Data)
+  # ---------------------------------------------------------------------------
+  SADSCAN_IMAGE: "registry.web.boeing.com/ecs-catalog/docker-images/gitlab-secret-analyzer"
+  SADSCAN_IMAGE_VERSION: "v0.9.0"
+  SAD_SCAN_SKIP: "N"                         # Set Y to skip gitleaks scan (not recommended)
+
+  # ---------------------------------------------------------------------------
+  # Checkov (IaC Static Analysis)
+  # ---------------------------------------------------------------------------
+  CHECKOV_IMAGE: "registry.web.boeing.com/ecs-catalog/docker-images/checkov/v3.2"
+  CHECKOV_IMAGE_VERSION: "0.9.0"
+  CHECKOV_SCAN_SKIP: "N"                     # Set Y to skip Checkov scan (not recommended)
+
+  # ---------------------------------------------------------------------------
+  # TFLint (Terraform Linter)
+  # ---------------------------------------------------------------------------
+  TFLINT_IMAGE: "registry.web.boeing.com/ecs-catalog/docker-images/tflint/v0"
+  TFLINT_IMAGE_VERSION: "1"
+  TFLINT_SCAN_SKIP: "N"                      # Set Y to skip TFLint scan (not recommended)
+  TFLINT_TARGET_CLOUD: "azure"               # Target cloud: azure, aws, gcp (for plugin selection)
+
+
+    # ---------------------------------------------------------------------------
+  # Terrascan (IaC Policy Scanner)
+  # ---------------------------------------------------------------------------
+  TERRASCAN_IMAGE: "registry.web.boeing.com/ecs-catalog/docker-images/terrascan/v1"
+  TERRASCAN_IMAGE_VERSION: "1.0.0"
+  TERRASCAN_SCAN_SKIP: "N"                   # Set Y to skip Terrascan scan (not recommended)
+  TERRASCAN_TARGET_CLOUD: "azure"            # Target cloud: azure, aws, gcp (comma-separated for multiple)
+
+  # ---------------------------------------------------------------------------
+  # Infracost (FinOps Cost Estimation)
+  # ---------------------------------------------------------------------------
+  INFRACOST_IMAGE: "infracost/infracost"
+  INFRACOST_IMAGE_VERSION: "latest"
+  INFRACOST_SCAN_SKIP: "N"                   # Set Y to skip cost estimation
+  INFRACOST_SCAN_DIR: ""                      # Custom scan dir (auto-detects .kaas if empty)
+  INFRACOST_CURRENCY: "USD"                   # Cost display currency: USD, EUR, GBP, etc.
+  # INFRACOST_API_KEY: Set as masked/protected variable in GitLab CI/CD settings
+
+  # ---------------------------------------------------------------------------
+  # Terratest (IaC Integration Testing)
+  # ---------------------------------------------------------------------------
+  TERRATEST_IMAGE: "golang"
+  TERRATEST_IMAGE_VERSION: "1.22"
+  TERRATEST_SCAN_SKIP: "N"                   # Set Y to skip integration tests
+  TERRATEST_SCAN_DIR: ""                      # Custom test dir (auto-detects test/ or tests/)
+  TERRATEST_TIMEOUT: "30m"                    # Max test duration (Go duration: 30m, 1h, etc.)
+  TERRATEST_PARALLELISM: "1"                  # Parallel test count (1 = sequential, safer)
+  # Note: Terratest needs Azure credentials — uses same AZ_<branch>_* pattern
+
+  # ---------------------------------------------------------------------------
+  # Pipeline Behavior
+  # ---------------------------------------------------------------------------
+  GIT_SSL_NO_VERIFY: "false"                  # Bypass SSL verification for Git operations
+
+  # ---------------------------------------------------------------------------
+  # Application Metadata (passed to Terraform as -var)
+  # ---------------------------------------------------------------------------
+  APP: ""                                     # Application name
+  COMPONENT: ""                               # Component name
+  CLASSIFICATION: ""                          # Data classification
+  PREP_PLATFORM: ""                           # Target platform
+  PREP_TARGET: ""                             # Deployment target
+  PREP_REGION: ""                             # Deployment region
+
+  COVERITY_IMAGE: "registry.web.boeing.com/ecs-catalog/docker-images/coverity-analysis/v2025"
+  COVERITY_IMAGE_VERSION: "0"

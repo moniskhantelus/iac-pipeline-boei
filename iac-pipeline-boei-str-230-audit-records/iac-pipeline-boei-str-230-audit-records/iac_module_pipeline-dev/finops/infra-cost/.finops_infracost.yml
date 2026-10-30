@@ -1,0 +1,124 @@
+# =============================================================================
+# GitLab CI Job: Infracost FinOps Cost Estimation
+# Purpose: Estimates the cloud cost of infrastructure changes from Terraform plan.
+#          Shows cost breakdown per resource and monthly cost difference
+#          (current vs proposed) to prevent unexpected cloud spending.
+# Reference: https://www.infracost.io/
+# =============================================================================
+iac_infracost_job:
+  # Stage in the CI pipeline where this job runs
+  stage: iac_finops
+
+
+  # Docker image used for running Infracost
+  # Variables INFRACOST_IMAGE and INFRACOST_IMAGE_VERSION should be defined in CI/CD settings
+  # e.g., infracost/infracost:latest
+  image: ${INFRACOST_IMAGE}:${INFRACOST_IMAGE_VERSION}
+
+  variables:
+    GIT_SSL_NO_VERIFY: "true"
+    # INFRACOST_API_KEY: Required for Infracost Cloud features (optional for CLI)
+    # Set as masked/protected variable in GitLab CI/CD settings
+    INFRACOST_API_KEY: "${INFRACOST_API_KEY}"
+    # INFRACOST_SCAN_DIR: Directory containing Terraform files
+    INFRACOST_SCAN_DIR: "${INFRACOST_SCAN_DIR}"
+    # INFRACOST_CURRENCY: Currency for cost display
+    # Options: USD, EUR, GBP, etc.
+    INFRACOST_CURRENCY: "${INFRACOST_CURRENCY}"
+
+  # Run on all pipelines to show cost impact of every change
+  rules:
+    - when: always
+
+  # Artifacts are files preserved after the job completes
+  artifacts:
+    paths:
+      - reports/infracost-report.json       # Full cost breakdown in JSON
+      - reports/infracost-report.html       # HTML report for easy viewing
+      - reports/infracost-diff.json         # Cost difference (current vs proposed)
+    when: always
+
+  # Job execution steps
+  script:
+    - set -eo pipefail
+
+    - echo "=============== FinOps Cost Estimation (Infracost) ================================"
+    - echo "[INFO] Infracost estimation started"
+    - echo "[INFO] Docker image ${INFRACOST_IMAGE}:${INFRACOST_IMAGE_VERSION}"
+    - pwd
+    - ls
+
+    # Check if Infracost scan should be skipped via CI/CD variable
+    - |
+      if [[ "${INFRACOST_SCAN_SKIP}" == "Y" ]]; then
+        echo "[WARN] Skipping Infracost estimation — cost visibility disabled"
+        exit 0
+      fi
+
+
+    # Register Infracost API key if provided
+    - |
+      if [[ -n "${INFRACOST_API_KEY}" ]]; then
+        infracost configure set api_key "${INFRACOST_API_KEY}"
+        echo "[INFO] Infracost API key configured"
+      else
+        echo "[INFO] No API key — running in local-only mode"
+      fi
+
+    # Set currency if provided
+    - |
+      if [[ -n "${INFRACOST_CURRENCY}" ]]; then
+        infracost configure set currency "${INFRACOST_CURRENCY}"
+        echo "[INFO] Currency set to ${INFRACOST_CURRENCY}"
+      fi
+
+    # Method 1: If Terraform plan JSON exists (most accurate)
+    # Method 2: If no plan JSON, scan Terraform directory directly
+    - |
+      if [[ -f "${CI_PROJECT_DIR}/reports/output.json" ]]; then
+        echo "[INFO] Found Terraform plan JSON — using plan-based estimation (most accurate)"
+
+        # Generate cost breakdown from plan
+        infracost breakdown \
+          --path "${CI_PROJECT_DIR}/reports/output.json" \
+          --format json \
+          --out-file "${CI_PROJECT_DIR}/reports/infracost-report.json"
+
+        # Generate HTML report
+        infracost output \
+          --path "${CI_PROJECT_DIR}/reports/infracost-report.json" \
+          --format html \
+          --out-file "${CI_PROJECT_DIR}/reports/infracost-report.html"
+
+        # Display human-readable cost summary in console
+        infracost breakdown \
+          --path "${CI_PROJECT_DIR}/reports/output.json" \
+          --format table
+
+      else
+        echo "[WARN] Plan JSON not found — using directory-based estimation"
+
+        # Generate cost breakdown from Terraform files
+        infracost breakdown \
+          --path "${CI_PROJECT_DIR}" \
+          --format json \
+          --out-file "${CI_PROJECT_DIR}/reports/infracost-report.json"
+
+        # Generate HTML report
+        infracost output \
+          --path "${CI_PROJECT_DIR}/reports/infracost-report.json" \
+          --format html \
+          --out-file "${CI_PROJECT_DIR}/reports/infracost-report.html"
+
+        # Display human-readable cost summary in console
+        infracost breakdown \
+          --path "${CI_PROJECT_DIR}" \
+          --format table
+      fi
+
+    - echo "[INFO] Infracost estimation completed"
+    - echo "[INFO] Reports saved to reports/infracost-report.json and reports/infracost-report.html"
+
+  # Cost estimation should not block deployments by default
+  # Change to false if you want to enforce cost guardrails
+  allow_failure: true

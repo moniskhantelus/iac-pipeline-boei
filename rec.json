@@ -1,0 +1,29 @@
+{
+  "actor": "mohammadmonis.khan",
+  "commit_sha": "7ebf18eb43f3f316e0c3017922afaf9725308dda",
+  "plan_hash": "33ca4b8020f0880fba30c9e8884cd1467dd7680ee340af27c524cb26aeae1307",
+  "timestamp": "2026-10-29T19:06:43Z",
+  "environment": "sandbox",
+  "module": "azure_resource_group",
+  "outcome": "success",
+  "pipeline_id": "12668957",
+  "job_id": "52346639",
+  "pipeline_url": "https://git.web.boeing.com/kaas/platform/infra-lab/azure_resource_group/-/pipelines/12668957",
+  "exit_code": 0,
+  "operation": "apply",
+  "project_path": "kaas/platform/infra-lab/azure_resource_group",
+  "branch": "sandbox_STR301",
+  "subscription_id": "6f2c86ca-f3f2-4e70-a973-dc60df5475ae",
+  "approvers": "unavailable",
+  "change_ticket": "unavailable",
+  "resource_changes": {
+    "counts": {
+      "create": 0,
+      "update": 0,
+      "delete": 0,
+      "replace": 0
+    },
+    "addresses": []
+  },
+  "record_sha256": "ed397cfe93722a7c1e6ad04e92948a6c0b364346e5381dbc1e8e31c5d57e47a8"
+}

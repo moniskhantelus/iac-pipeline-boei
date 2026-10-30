@@ -1,0 +1,191 @@
+# =============================================================================
+# GitLab CI Job: TFLint Terraform Linter
+# Purpose: Lints Terraform files for best practices, naming conventions,
+#          deprecated syntax, and cloud provider-specific issues.
+#          Catches errors that terraform validate misses.
+# Reference: https://github.com/terraform-linters/tflint
+# =============================================================================
+iac_tf_test_job:
+  # Stage in the CI pipeline where this job runs
+  #stage: iac_tflint
+  stage: iac_terratest
+
+
+  # Docker image used for running TFLint
+  # Variables TFLINT_IMAGE and TFLINT_IMAGE_VERSION should be defined in CI/CD settings
+  # e.g., ghcr.io/terraform-linters/tflint:latest
+  image: ${TFLINT_IMAGE}:${TFLINT_IMAGE_VERSION}
+
+  variables:
+    GIT_SSL_NO_VERIFY: "false"
+    # TFLINT_TARGET_CLOUD: Cloud provider plugin to use
+    # Options: azure, aws, gcp
+    # Override in GitLab CI/CD settings per project
+    # Default: azure
+    #TFLINT_TARGET_CLOUD: "${TFLINT_TARGET_CLOUD}"
+    # TFLINT_SCAN_DIR: Directory to scan for Terraform files
+    # Override in GitLab CI/CD settings per project
+    # Default: empty (auto-detects .kaas or CI_PROJECT_DIR)
+    TFLINT_SCAN_DIR: "${TFLINT_SCAN_DIR}"
+
+  # Run on all pipelines to catch lint issues early
+  #rules:
+  #  - when: always    # Execute on every pipeline regardless of branch or event
+
+  # Artifacts are files preserved after the job completes
+  # Reports are saved regardless of pass/fail so results can be reviewed
+  artifacts:
+    paths:
+      - reports/tflint-report.json
+    when: always
+
+  # Job execution steps
+  script:
+    #- set -eo pipefail
+
+    - echo "=============== Terraform Linter (TFLint) ================================"
+    - echo "[INFO] TFLint scan started"
+    - echo "[INFO] Docker image ${TFLINT_IMAGE}:${TFLINT_IMAGE_VERSION}"
+    - pwd
+    - ls
+
+    - |
+      export http_proxy="http://www-proxy.web.boeing.com:31060"
+      export https_proxy="http://www-proxy.web.boeing.com:31060"
+      export no_proxy="169.254.169.254,localhost,127.0.0.1,.amazonaws.com,.boeing.com"
+
+    # Check if TFLint scan should be skipped via CI/CD variable
+    # Set TFLINT_SCAN_SKIP=Y in CI/CD variables to bypass (not recommended)
+    - |
+      if [[ "${TFLINT_SCAN_SKIP}" == "Y" ]]; then
+        echo "[WARN] Skipping TFLint scan — this is not good practice"
+        exit 0
+      fi
+
+    
+    # Remove examples folder from scan scope (not production code)
+    # TFLint --recursive has no --exclude flag, so we move examples aside
+    - |
+      TFLINT_SCAN_EXAMPLES_INCLUDE="Y"
+      if [[ -d "${CI_PROJECT_DIR}/examples" ]]; then
+        echo "[INFO] Excluding examples/ folder from TFLint scan"
+        mv "${CI_PROJECT_DIR}/examples" "${CI_PROJECT_DIR}/.examples_backup"
+        TFLINT_SCAN_EXAMPLES_INCLUDE="N"
+      fi
+
+    # Dynamically generate .tflint.hcl config based on target cloud
+    # This installs the correct provider plugin for linting
+    - |
+      echo "[INFO] Generating TFLint config for ${TFLINT_TARGET_CLOUD}..."
+
+      # Map cloud name to plugin
+      case "${CI_PROJECT_DIR}" in
+        azure)
+          PLUGIN_NAME="azurerm"
+          PLUGIN_SOURCE="github.com/terraform-linters/tflint-ruleset-azurerm"
+          ;;
+        aws)
+          PLUGIN_NAME="aws"
+          PLUGIN_SOURCE="github.com/terraform-linters/tflint-ruleset-aws"
+          ;;
+        gcp)
+          PLUGIN_NAME="google"
+          PLUGIN_SOURCE="github.com/terraform-linters/tflint-ruleset-google"
+          ;;
+        *)
+          echo "[WARN] Unknown cloud '${TFLINT_TARGET_CLOUD}' — running without provider plugin"
+          PLUGIN_NAME=""
+          ;;
+      esac
+
+      if [[ -n "${PLUGIN_NAME}" ]]; then
+        cat > .tflint.hcl << EOF
+      plugin "${PLUGIN_NAME}" {
+        enabled = true
+        source  = "${PLUGIN_SOURCE}"
+        version = "latest"
+      }
+      EOF
+        echo "[INFO] TFLint config generated with ${PLUGIN_NAME} plugin"
+        cat .tflint.hcl
+      else
+        echo "[INFO] Running TFLint without provider-specific plugin"
+      fi
+
+    # Create reports directory
+    - mkdir -p "${CI_PROJECT_DIR}/reports"
+
+    # Initialize TFLint (downloads plugins)
+    - echo "[INFO] Initializing TFLint..."
+    - tflint --init
+    - EXIT_CODE=$?
+
+
+    # Run TFLint and generate reports
+    # --format: output format (default for console, json for artifact)
+    # --force: return exit code 0 even if issues found (for report generation)
+    # --recursive: scan all subdirectories
+    - |
+      echo "[INFO] Running TFLint scan..."
+
+      # Console output (human-readable)
+      tflint --format default --recursive || TFLINT_EXIT=$?
+
+      # JSON report for artifacts
+      tflint --format json --recursive --force > "${CI_PROJECT_DIR}/reports/tflint-report.json" 2>&1 || true
+
+      # Generate summary table from JSON report
+      echo ""
+      echo "=============== TFLint Summary Table ================================"
+      if [[ -f "${CI_PROJECT_DIR}/reports/tflint-report.json" ]] && command -v jq &>/dev/null; then
+        TOTAL=$(jq '[.issues // []] | flatten | length' "${CI_PROJECT_DIR}/reports/tflint-report.json" 2>/dev/null || echo 0)
+        ERRORS=$(jq '[.issues // []] | flatten | [.[] | select(.rule.severity == "error")] | length' "${CI_PROJECT_DIR}/reports/tflint-report.json" 2>/dev/null || echo 0)
+        WARNINGS=$(jq '[.issues // []] | flatten | [.[] | select(.rule.severity == "warning")] | length' "${CI_PROJECT_DIR}/reports/tflint-report.json" 2>/dev/null || echo 0)
+        NOTICES=$(jq '[.issues // []] | flatten | [.[] | select(.rule.severity == "notice" or .rule.severity == "info")] | length' "${CI_PROJECT_DIR}/reports/tflint-report.json" 2>/dev/null || echo 0)
+
+        printf "\n%-15s | %-10s\n" "Severity" "Count"
+        printf "%-15s | %-10s\n" "---------------" "----------"
+        printf "%-15s | %-10s\n" "Errors" "${ERRORS}"
+        printf "%-15s | %-10s\n" "Warnings" "${WARNINGS}"
+        printf "%-15s | %-10s\n" "Notices" "${NOTICES}"
+        printf "%-15s | %-10s\n" "---------------" "----------"
+        printf "%-15s | %-10s\n" "TOTAL" "${TOTAL}"
+
+        # Show detailed issues table if any found
+        if [[ "${TOTAL}" -gt 0 ]]; then
+          echo ""
+          printf "%-12s | %-40s | %-30s | %-6s\n" "Severity" "Rule" "File" "Line"
+          printf "%-12s | %-40s | %-30s | %-6s\n" "------------" "----------------------------------------" "------------------------------" "------"
+          jq -r '[.issues // []] | flatten | .[] | [.rule.severity, .rule.name, .range.filename, (.range.start.line | tostring)] | @tsv' \
+            "${CI_PROJECT_DIR}/reports/tflint-report.json" 2>/dev/null | \
+            while IFS=$'\t' read -r severity rule file line; do
+              printf "%-12s | %-40s | %-30s | %-6s\n" "${severity}" "${rule}" "${file}" "${line}"
+            done
+        fi
+      else
+        echo "[WARN] Unable to generate summary — jq not available or report not found"
+      fi
+      echo "====================================================================="
+
+      echo "[INFO] TFLint scan completed"
+
+      # Restore examples folder if it was moved
+      if [[ "${TFLINT_SCAN_EXAMPLES_INCLUDE}" == "N" ]]; then
+        mv "${CI_PROJECT_DIR}/.examples_backup" "${CI_PROJECT_DIR}/examples"
+        echo "[INFO] Restored examples/ folder"
+      fi
+
+      # If TFLint found issues, exit with the original exit code
+      #if [[ "${TFLINT_EXIT:-0}" -ne 0 ]]; then
+      #  echo "[ERROR] TFLint found issues — see report above"
+      #  exit ${TFLINT_EXIT}
+      #fi
+
+      if [ $EXIT_CODE -eq 2 ]; then
+         echo "TFLint found warnings, but proceeding anyway."
+         exit 0
+      elif [ $EXIT_CODE -ne 0 ]; then
+         exit $EXIT_CODE
+      fi
+
+  allow_failure: false

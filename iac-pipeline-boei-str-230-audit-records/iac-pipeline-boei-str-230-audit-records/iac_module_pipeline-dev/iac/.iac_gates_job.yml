@@ -1,0 +1,23 @@
+# =============================================================================
+# GitLab CI Job: Terraform Init + Plan (Azure)
+# Purpose: Initializes the Terraform working directory for Azure infrastructure.
+#          Authenticates to Azure via Service Principal, generates the provider
+#          and backend configuration dynamically, then runs terraform init/plan.
+# =============================================================================
+
+iac_gates_job:
+  stage: iac_approval
+  # TERRAFORM_IMAGE and TERRAFORM_IMAGE_VERSION injected via dotenv from pre_work_job
+  image: "${TERRAFORM_IMAGE}:${TERRAFORM_IMAGE_VERSION}"
+  variables:
+    GIT_SSL_NO_VERIFY: "true"    # Bypass SSL verification for Git operations
+  script:
+    # Exit immediately on error; propagate errors through pipes
+    # Must be first to catch all failures including az login
+    # - set -eo pipefail
+    - |
+      echo "[INFO]: Executing and waiting for the user to validate the testing"
+      ls -la
+      echo "[INFO]: Executing and waiting for the user to validate the testing"
+  when: manual
+  allow_failure: false
