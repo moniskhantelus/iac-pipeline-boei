@@ -12,9 +12,40 @@ iac_destroy_job:
   image: "${TERRAFORM_IMAGE}:${TERRAFORM_IMAGE_VERSION}"
 
   variables:
-    GIT_SSL_NO_VERIFY: "true"    # Bypass SSL verification for Git operations
+    GIT_SSL_NO_VERIFY: "false"    # Bypass SSL verification for Git operations
+    AUDIT_ENVIRONMENT: "$DEPLOY_ENV"     # STR-230 record environment (sandbox|dev|uat|prod)
+    AUDIT_MODULE: "$CI_PROJECT_NAME"     # STR-230 record module / blob prefix
 
+  needs:
+    - job: iac_gates_job
+      artifacts: true
   script:
+    - set -eo pipefail
+    - |
+      python3 - <<'VERIFY_GATE_PY'
+      import json, os, sys
+      from pathlib import Path
+      try:
+          decision = json.loads((Path(os.environ['CI_PROJECT_DIR']) / 'gate-decision.json').read_text())
+          expected = os.environ.get('DEPLOY_ENV') or os.environ.get('TF_ENV')
+          if expected not in ('sandbox', 'dev', 'uat', 'prod'):
+              raise ValueError('invalid target environment')
+          for key, value in [('environment', expected), ('commit_sha', os.environ['CI_COMMIT_SHA']),
+                             ('pipeline_id', os.environ['CI_PIPELINE_ID']), ('outcome', 'APPROVED')]:
+              if not value or decision.get(key) != value:
+                  raise ValueError('gate decision mismatch: ' + key)
+          required = {'sandbox': 0, 'dev': 0, 'uat': 1, 'prod': 2}[expected]
+          if type(decision.get('approvals_count')) is not int or decision['approvals_count'] < required:
+              raise ValueError('gate approval count below story minimum')
+          if expected == 'prod' and not decision.get('change_ticket'):
+              raise ValueError('production gate has no change record')
+      except Exception as exc:
+          print('[ERROR] Apply refused: missing or invalid approval gate evidence: ' + str(exc), file=sys.stderr)
+          sys.exit(1)
+      print('[INFO] Approval gate evidence verified for ' + expected)
+      VERIFY_GATE_PY
+    # STR-230: write the audit runtime (.str230/audit.py); destroy is audited like apply.
+    - !reference [.str230_runtime, script]
     # Exit immediately on error; propagate errors through pipes
     # Must be first to catch all failures including az login
     #- set -eo pipefail
@@ -24,8 +55,8 @@ iac_destroy_job:
     # Extract branch prefix (value before first underscore)
     # e.g., dev_feature -> dev, uat_fix -> uat, main -> main
     - BRANCH_PREFIX="${CI_COMMIT_BRANCH%%_*}"
-    - BRANCH_PREFIX_UPPER="${BRANCH_PREFIX^^}"
-    - BRANCH_PREFIX_LOWER=${BRANCH_PREFIX,,}
+    - BRANCH_PREFIX_UPPER=$(printf '%s' "${BRANCH_PREFIX}" | tr '[:lower:]' '[:upper:]')
+    - BRANCH_PREFIX_LOWER=$(printf '%s' "${BRANCH_PREFIX}" | tr '[:upper:]' '[:lower:]')
     - echo "[INFO] BRANCH_PREFIX=${BRANCH_PREFIX} and BRANCH_PREFIX_UPPER=${BRANCH_PREFIX_UPPER} and BRANCH_PREFIX_LOWER=${BRANCH_PREFIX_LOWER}"
 
 
@@ -95,7 +126,7 @@ iac_destroy_job:
 
     # Initialize Terraform (downloads providers, configures backend)
     #- terraform init
-    #- /tmp/scripts/install_tf_providers.sh $SRES_USERNAME $SRES_TOKEN "azurerm" "5.2.0" 
+    #- /tmp/scripts/install_tf_providers.sh $SRES_USERNAME $SRES_TOKEN "azurerm" "5.2.0"
     - |
       #cd examples/basic-deployment
       echo "[TEST: Example Base] Executing the terraform example folder Started  "
@@ -106,8 +137,8 @@ iac_destroy_job:
     - |
       cat > $CI_PROJECT_DIR/examples/basic/statefile.tf <<EOF
       terraform {
-         backend "azurerm" {} 
-      }  
+         backend "azurerm" {}
+      }
       EOF
     - |
       cat > $CI_PROJECT_DIR/examples/basic/backend.hcl <<EOF
@@ -116,21 +147,31 @@ iac_destroy_job:
       container_name       = "${AZ_BACKEND_CONTAINER}"
       environment          = "usgovernment"
       use_azuread_auth     = true
-      key                  = "terraform/$CI_PROJECT_NAME/$CI_COMMIT_BRANCH/$CI_PROJECT_NAME-$CI_COMMIT_BRANCH.tfstate"  
-      EOF  
+      key                  = "terraform/$CI_PROJECT_NAME/$CI_COMMIT_BRANCH/$CI_PROJECT_NAME-$CI_COMMIT_BRANCH.tfstate"
+      EOF
 
     - |
       terraform -chdir=examples/basic init -backend-config=$CI_PROJECT_DIR/examples/basic/backend.hcl
-      terraform -chdir=examples/basic destroy -var-file=terraform.tfvars -auto-approve
       echo "[TEST: Example Base] Executing the terraform example folder "
+    # STR-230: audited destroy (terraform destroy + WORM record, fail-closed like apply).
+    - python3 "${CI_PROJECT_DIR}/.str230/audit.py" destroy
     - cat $CI_PROJECT_DIR/examples/basic/backend.hcl || true
     - ls -la
 
     #- |
     #  echo "[TEST: Example Complete] Executing the terraform example folder Start "
-    #  terraform -chdir=examples/complete init 
+    #  terraform -chdir=examples/complete init
     #  terraform -chdir=examples/complete destroy -var-file=terraform.tfvars -auto-approve
-    #  echo "[TEST: Example Complete] Executing the terraform example folder Completed " 
+    #  echo "[TEST: Example Complete] Executing the terraform example folder Completed "
+  after_script:
+    - python3 "${CI_PROJECT_DIR}/.str230/audit.py" finalize --operation destroy
+  artifacts:
+    when: always
+    expire_in: 90 days
+    paths:
+      - reports/terraform/terraform-destroy-output.txt
+      - reports/terraform/audit.json
+      - reports/terraform/audit-upload.txt
 
   # Destroy is destructive AND optional ("only when we need to tear down").
   # when:manual     -> never runs automatically; requires an explicit click.

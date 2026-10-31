@@ -1,10 +1,10 @@
 # =============================================================================
 # terraform-gate: environment-specific approval gate (STR-222)
 # Usable as `include: project/file` with inputs (today) and as a CI/CD component once
-# copied to templates/terraform-gate/template.yml of a components project.
-# The job body is scripts/gate.py embedded byte-for-byte (drift-tested by
-# tests/test_gate.py); edit scripts/gate.py and re-embed, never this copy alone.
-# See templates/terraform-gate/README.md for inputs, token setup and behavior.
+# copied to templates/compliance-gates/terraform-gate/template.yml of a components project.
+# The job body is templates/compliance-gates/terraform-gate/gate.py embedded byte-for-byte (drift-tested by
+# tests/test_gate.py); edit templates/compliance-gates/terraform-gate/gate.py and re-embed, never this copy alone.
+# See templates/compliance-gates/terraform-gate/README.md for inputs, token setup and behavior.
 # =============================================================================
 spec:
   inputs:
@@ -48,10 +48,10 @@ spec:
       expand: false            # regex may contain '$'; never treat it as a variable reference
     GATE_TOKEN: '$[[ inputs.gitlab_token ]]'
   rules:
-    - if: '$GATE_ENV =~ /^(sandbox|dev)$/'
-      when: on_success
-    - if: '$GATE_ENV =~ /^(uat|prod)$/'
+    - if: '$GATE_ENV =~ /^(uat|prod)$/ || $DEPLOY_ENV =~ /^(uat|prod)$/'
       when: manual
+    - if: '$GATE_ENV =~ /^(sandbox|dev)$/ || $DEPLOY_ENV =~ /^(sandbox|dev)$/'
+      when: on_success
     - when: on_success
   allow_failure: false
   script:
@@ -60,7 +60,7 @@ spec:
       cat > "${CI_PROJECT_DIR}/.terraform-gate/gate.py" <<'STR222_GATE_PY'
       #!/usr/bin/env python3
       """STR-222 environment-specific approval gate; standard library only (Python 3.6+).
-      Embedded byte-for-byte in templates/terraform-gate/template.yml (drift-tested).
+      Embedded byte-for-byte in templates/compliance-gates/terraform-gate/template.yml (drift-tested).
 
       Decision (from GATE_ENV, never from the branch name):
         sandbox, dev  APPROVED without any API call

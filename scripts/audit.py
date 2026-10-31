@@ -1,0 +1,411 @@
+#!/usr/bin/env python3
+"""STR-230 WORM audit runtime; standard library only.
+
+Actions:
+  apply     run `terraform apply <saved plan>` and always publish an audit record
+  destroy   run `terraform destroy` and always publish an audit record
+  finalize  after_script safety net: publish a failure record if none was written
+  query     list/filter records in the WORM container
+
+Audit record fields (provisional schema; S010 is unavailable, so this list is the
+extended schema enforced by validate() before every upload, see FIELDS):
+  actor             GITLAB_USER_LOGIN, else GITLAB_USER_ID (who ran the job)
+  commit_sha        CI_COMMIT_SHA
+  plan_hash         SHA-256 of the saved plan applied (null if missing / destroy)
+  timestamp         UTC, YYYY-MM-DDTHH:MM:SSZ
+  environment       AUDIT_ENVIRONMENT, else DEPLOY_ENV, else branch mapping
+                    (main->prod, sandbox*/STR_230*->sandbox, dev*->dev, uat*->uat);
+                    must be one of ENVIRONMENTS (fail closed)
+  module            AUDIT_MODULE, else CI_PROJECT_NAME, else CI_PROJECT_PATH
+  outcome           success | failure (from the terraform exit code)
+  pipeline_id       CI_PIPELINE_ID
+  job_id            CI_JOB_ID
+  pipeline_url      CI_PIPELINE_URL (nullable)
+  exit_code         terraform exit code (1 if terraform was not reached)
+  operation         apply | destroy
+  project_path      CI_PROJECT_PATH (nullable)
+  branch            CI_COMMIT_REF_NAME (nullable)
+  subscription_id   ARM_SUBSCRIPTION_ID if set (nullable)
+  approvers         sorted MR approver usernames, [] if no MR, "unavailable" on lookup error
+  change_ticket     CHANGE_TICKET, else (CHG|INC)NNNNNNN from MR description, else from
+                    CI_COMMIT_MESSAGE, else "unavailable"
+  resource_changes  {"counts": {create, update, delete, replace}, "addresses": [...]} from
+                    `terraform show -json <plan>` (addresses only, never values), or "unavailable"
+  record_sha256     SHA-256 of the canonical JSON (sort_keys, separators (',', ':')) of
+                    every other field; also stored as blob metadata sha256=<hex>
+
+Blob name: {env}/{module}/{YYYY}/{MM}/{DD}/audit-{env}-{pipeline_id}-{job_id}-{uuid8}.json,
+uploaded with --overwrite false --if-none-match * (never overwrites).
+
+Settings (environment): TF_ROOT (default examples/basic), AUDIT_REPORT_DIR (default
+reports/terraform, relative to CI_PROJECT_DIR), AUDIT_STORAGE_ACCOUNT, AUDIT_CONTAINER,
+AUDIT_USE_MANAGED_IDENTITY (Y|N), AUDIT_MI_CLIENT_ID, AUDIT_SUBSCRIPTION_ID,
+AUDIT_REQUIRE_MI (Y = refuse SP mode in prod), AUDIT_VERIFY_IMMUTABILITY (Y|N),
+AUDIT_RESOURCE_GROUP, AUDIT_GITLAB_TOKEN, CHANGE_TICKET.
+"""
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import urllib.parse
+import urllib.request
+import uuid
+
+ENVIRONMENTS = ('sandbox', 'dev', 'uat', 'prod', 'shared-services')
+FIELDS = ('actor', 'commit_sha', 'plan_hash', 'timestamp', 'environment', 'module', 'outcome',
+          'pipeline_id', 'job_id', 'pipeline_url', 'exit_code', 'operation', 'project_path',
+          'branch', 'subscription_id', 'approvers', 'change_ticket', 'resource_changes',
+          'record_sha256')
+NULLABLE = {'plan_hash', 'pipeline_url', 'project_path', 'branch', 'subscription_id'}
+TICKET = re.compile(r'(?:CHG|INC)[0-9]{7}')
+UNAVAILABLE = 'unavailable'
+
+
+def az(*args):
+    return subprocess.check_output(['az', *args, '--only-show-errors'], text=True)
+
+
+def report_dir():
+    return Path(os.environ['CI_PROJECT_DIR']) / (os.environ.get('AUDIT_REPORT_DIR') or 'reports/terraform')
+
+
+def tf_root():
+    return os.environ.get('TF_ROOT') or 'examples/basic'
+
+
+def slug(value):
+    return re.sub(r'[^A-Za-z0-9._-]+', '-', str(value))
+
+
+def environment(strict=True):
+    e = os.environ
+    # Ignore unexpanded CI references such as a literal "$DEPLOY_ENV".
+    value = next((v for v in (e.get('AUDIT_ENVIRONMENT'), e.get('DEPLOY_ENV')) if v and not v.startswith('$')), None)
+    if not value:
+        ref = e.get('CI_COMMIT_REF_NAME', '')
+
+        def branch(prefix):
+            return ref == prefix or ref.startswith(prefix + '_')
+        if ref == 'main':
+            value = 'prod'
+        elif branch('sandbox') or ref.startswith('STR_230'):
+            value = 'sandbox'
+        elif branch('dev'):
+            value = 'dev'
+        elif branch('uat'):
+            value = 'uat'
+    if value not in ENVIRONMENTS:
+        if strict:
+            raise ValueError('audit environment %r is not one of %s' % (value, ', '.join(ENVIRONMENTS)))
+        return None
+    return value
+
+
+def identity_guard(warn=True):
+    e = os.environ
+    if e.get('AUDIT_USE_MANAGED_IDENTITY', 'N') == 'Y' or environment(strict=False) != 'prod':
+        return
+    if e.get('AUDIT_REQUIRE_MI', 'N') == 'Y':
+        raise RuntimeError('AUDIT_REQUIRE_MI=Y: prod audit upload must use a managed identity '
+                           '(set AUDIT_USE_MANAGED_IDENTITY=Y)')
+    if warn:
+        print('WARNING: STR-230 prod audit upload is reusing the Terraform service-principal session, '
+              'not a managed identity. Set AUDIT_USE_MANAGED_IDENTITY=Y once runner MI is provisioned; '
+              'AUDIT_REQUIRE_MI=Y turns this warning into a hard failure.', file=sys.stderr)
+
+
+def login():
+    # Auth for the audit upload:
+    #   AUDIT_USE_MANAGED_IDENTITY=Y -> log in with the runner managed identity
+    #     (production/compliance path; requires an MI attached to the runner;
+    #     AUDIT_MI_CLIENT_ID selects a user-assigned identity).
+    #   otherwise -> REUSE the Terraform service-principal session the job already
+    #     established earlier (az login --service-principal). We don't start a
+    #     separate login or switch AZURE_CONFIG_DIR, so the existing SP token is used
+    #     for the upload via --auth-mode login. Lets the record upload work on runners
+    #     without a managed identity. In prod this prints a WARNING (or fails when
+    #     AUDIT_REQUIRE_MI=Y).
+    identity_guard()
+    e = os.environ
+    if e.get('AUDIT_USE_MANAGED_IDENTITY', 'N') == 'Y':
+        e['AZURE_CONFIG_DIR'] = str(Path(e['CI_PROJECT_DIR']) / '.audit-azure')
+        az('cloud', 'set', '--name', e.get('AZ_LOGIN_CSP_TYPE') or e.get('AZ_CSP_TYPE') or 'AzureUSGovernment')
+        args = ['login', '--identity']
+        if e.get('AUDIT_MI_CLIENT_ID'):
+            args += ['--client-id', e['AUDIT_MI_CLIENT_ID']]
+        az(*args)
+        if e.get('AUDIT_SUBSCRIPTION_ID'):
+            az('account', 'set', '--subscription', e['AUDIT_SUBSCRIPTION_ID'])
+
+
+def storage():
+    return ['--account-name', os.environ['AUDIT_STORAGE_ACCOUNT'], '--container-name',
+            os.environ.get('AUDIT_CONTAINER', 'audit'), '--auth-mode', 'login']
+
+
+def gitlab_get(path):
+    e = os.environ
+    token = e.get('AUDIT_GITLAB_TOKEN')
+    headers = {'PRIVATE-TOKEN': token} if token else {'JOB-TOKEN': e['CI_JOB_TOKEN']}
+    url = '%s/projects/%s/%s' % (e['CI_API_V4_URL'].rstrip('/'), urllib.parse.quote(e['CI_PROJECT_ID'], safe=''), path)
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=5) as response:
+        return json.loads(response.read().decode('utf-8'))
+
+
+def change_context():
+    """Best-effort approvers + change ticket; never raises."""
+    e = os.environ
+    approvers, description = UNAVAILABLE, ''
+    try:
+        mrs = gitlab_get('repository/commits/%s/merge_requests' % e['CI_COMMIT_SHA'])
+        mr = next((m for m in mrs if m.get('state') == 'merged'), mrs[0] if mrs else None)
+        if mr is None:
+            approvers = []
+        else:
+            description = mr.get('description') or ''
+            approvals = gitlab_get('merge_requests/%s/approvals' % mr['iid'])
+            approvers = sorted({a['user']['username'] for a in approvals.get('approved_by') or []})
+    except Exception as exc:
+        # Only the exception type is logged: never tokens or response bodies.
+        print('AUDIT: approver lookup unavailable (%s)' % type(exc).__name__, file=sys.stderr)
+        approvers = UNAVAILABLE
+    ticket = (e.get('CHANGE_TICKET') or '').strip()
+    if not ticket:
+        match = TICKET.search(description) or TICKET.search(e.get('CI_COMMIT_MESSAGE') or '')
+        ticket = match.group(0) if match else UNAVAILABLE
+    return approvers, ticket
+
+
+def resource_summary(plan):
+    """Counts + addresses from `terraform show -json`; before/after values are never copied."""
+    try:
+        shown = subprocess.run(['terraform', '-chdir=' + tf_root(), 'show', '-json', str(plan)],
+                               capture_output=True, text=True, timeout=300, check=True).stdout
+        counts = dict(create=0, update=0, delete=0, replace=0)
+        addresses = []
+        for change in json.loads(shown).get('resource_changes') or []:
+            actions = list((change.get('change') or {}).get('actions') or [])
+            if 'create' in actions and 'delete' in actions:
+                kind = 'replace'
+            elif actions in (['create'], ['update'], ['delete']):
+                kind = actions[0]
+            else:
+                continue  # no-op / read
+            counts[kind] += 1
+            addresses.append(str(change.get('address')))
+        return dict(counts=counts, addresses=sorted(addresses))
+    except Exception as exc:
+        print('AUDIT: resource-change summary unavailable (%s)' % type(exc).__name__, file=sys.stderr)
+        return UNAVAILABLE
+
+
+def digest(data):
+    canonical = json.dumps({k: v for k, v in data.items() if k != 'record_sha256'},
+                           sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+def record(code, plan, operation='apply', changes=UNAVAILABLE):
+    e = os.environ
+    approvers, ticket = change_context()
+    data = dict(actor=e.get('GITLAB_USER_LOGIN') or e.get('GITLAB_USER_ID'),
+                commit_sha=e.get('CI_COMMIT_SHA'),
+                plan_hash=hashlib.sha256(plan.read_bytes()).hexdigest() if plan is not None and plan.is_file() else None,
+                timestamp=dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                environment=environment(),
+                module=e.get('AUDIT_MODULE') or e.get('CI_PROJECT_NAME') or e.get('CI_PROJECT_PATH'),
+                outcome='success' if code == 0 else 'failure',
+                pipeline_id=e.get('CI_PIPELINE_ID'), job_id=e.get('CI_JOB_ID'),
+                pipeline_url=e.get('CI_PIPELINE_URL'), exit_code=code,
+                operation=operation, project_path=e.get('CI_PROJECT_PATH'),
+                branch=e.get('CI_COMMIT_REF_NAME'), subscription_id=e.get('ARM_SUBSCRIPTION_ID') or None,
+                approvers=approvers, change_ticket=ticket, resource_changes=changes)
+    data['record_sha256'] = digest(data)
+    return data
+
+
+def validate(data):
+    missing = [k for k in FIELDS if k not in data]
+    empty = [k for k in FIELDS if k in data and k not in NULLABLE and data[k] in (None, '')]
+    unknown = [k for k in data if k not in FIELDS]
+    if missing or empty or unknown:
+        raise ValueError('audit record schema check failed: missing=%s empty=%s unknown=%s' % (missing, empty, unknown))
+    if data['operation'] not in ('apply', 'destroy') or data['environment'] not in ENVIRONMENTS:
+        raise ValueError('audit record schema check failed: bad operation/environment')
+    if data['record_sha256'] != digest(data):
+        raise ValueError('audit record schema check failed: record_sha256 mismatch')
+
+
+def blob_name(data):
+    stamp, env = data['timestamp'], slug(data['environment'])
+    return '%s/%s/%s/%s/%s/audit-%s-%s-%s-%s.json' % (
+        env, slug(data['module']), stamp[:4], stamp[5:7], stamp[8:10],
+        env, slug(data['pipeline_id']), slug(data['job_id']), uuid.uuid4().hex[:8])
+
+
+def verify_immutability():
+    e = os.environ
+    if e.get('AUDIT_VERIFY_IMMUTABILITY', 'N') != 'Y':
+        return
+    args = ['storage', 'container', 'immutability-policy', 'show', '--account-name', e['AUDIT_STORAGE_ACCOUNT'],
+            '--container-name', e.get('AUDIT_CONTAINER', 'audit'), '-o', 'json']
+    if e.get('AUDIT_RESOURCE_GROUP'):
+        args += ['--resource-group', e['AUDIT_RESOURCE_GROUP']]
+    if e.get('AUDIT_SUBSCRIPTION_ID'):
+        # Audit account may live in a different subscription than the deploy target.
+        args += ['--subscription', e['AUDIT_SUBSCRIPTION_ID']]
+    try:
+        policy = json.loads(az(*args) or 'null') or {}
+    except Exception as exc:
+        raise RuntimeError('container immutability policy check failed: %s' % exc) from exc
+    state, days = policy.get('state'), policy.get('immutabilityPeriodSinceCreationInDays')
+    print('AUDIT: container immutability policy state=%s retention_days=%s' % (state, days))
+    if not state or not days:
+        raise RuntimeError('no container immutability policy; upload refused (AUDIT_VERIFY_IMMUTABILITY=Y)')
+
+
+def publish(code, plan, operation='apply', changes=UNAVAILABLE):
+    directory = report_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    data = record(code, plan, operation, changes)
+    path = directory / 'audit.json'
+    path.write_text(json.dumps(data, indent=2) + '\n')
+    validate(data)
+    login()
+    verify_immutability()
+    name = blob_name(data)
+    az('storage', 'blob', 'upload', *storage(), '--name', name, '--file', str(path),
+       '--type', 'block', '--overwrite', 'false', '--if-none-match', '*', '--content-type', 'application/json',
+       '--metadata', 'sha256=' + data['record_sha256'])
+    (directory / 'audit-upload.txt').write_text(name + '\n')
+
+
+def run(operation):
+    directory = report_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    plan = directory / 'plan.tfplan'
+    output = directory / ('terraform-%s-output.txt' % operation)
+    try:
+        # Fail closed before touching infrastructure.
+        environment()
+        identity_guard(warn=False)
+    except (ValueError, RuntimeError) as exc:
+        message = 'AUDIT PREFLIGHT FAILED; %s refused: %s\n' % (operation, exc)
+        output.write_text(message)
+        print(message, end='', file=sys.stderr)
+        return 1
+    code, changes = 1, UNAVAILABLE
+    try:
+        with output.open('w') as log:
+            command = None
+            if operation == 'apply':
+                # Never silently regenerate the reviewed plan.
+                if not plan.is_file():
+                    log.write('Saved plan missing; apply refused.\n')
+                else:
+                    changes = resource_summary(plan)
+                    command = ['terraform', '-chdir=' + tf_root(), 'apply', '-no-color', str(plan)]
+            else:
+                command = ['terraform', '-chdir=' + tf_root(), 'destroy', '-no-color',
+                           '-var-file=terraform.tfvars', '-auto-approve']
+            if command:
+                process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                for line in process.stdout:
+                    log.write(line)
+                    print(line, end='', flush=True)
+                code = process.wait()
+    finally:
+        # An upload failure fails a successful run; it never hides a terraform failure.
+        try:
+            publish(code, plan if operation == 'apply' else None, operation, changes)
+        except Exception as exc:
+            print('AUDIT UPLOAD FAILED; retain/reconcile local audit.json:', exc, file=sys.stderr)
+            if code == 0:
+                code = 1
+    return code
+
+
+def apply():
+    return run('apply')
+
+
+def destroy():
+    return run('destroy')
+
+
+def matches(data, args):
+    stamp = dt.datetime.fromisoformat(data['timestamp'].replace('Z', '+00:00'))
+    for key in ('actor', 'environment', 'module', 'outcome', 'operation'):
+        wanted = getattr(args, key, None)
+        # Records written before the operation field existed were all applies.
+        if wanted and data.get(key, 'apply' if key == 'operation' else None) != wanted:
+            return False
+    return (not args.start or stamp >= args.start) and (not args.end or stamp <= args.end)
+
+
+def date(value):
+    parsed = dt.datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if parsed.tzinfo is None:
+        raise argparse.ArgumentTypeError('Use timezone-aware ISO-8601 timestamps')
+    return parsed
+
+
+def query(args):
+    login()
+    command = ['storage', 'blob', 'list', *storage(), '--num-results', '*', '-o', 'json']
+    if args.environment:
+        prefix = slug(args.environment) + '/'
+        if args.module:
+            prefix += slug(args.module) + '/'
+        command += ['--prefix', prefix]
+    names = json.loads(az(*command))
+    import tempfile
+    with tempfile.TemporaryDirectory() as temp:
+        path = Path(temp) / 'record.json'
+        for blob in names:
+            az('storage', 'blob', 'download', *storage(), '--name', blob['name'], '--file', str(path), '--overwrite', 'true')
+            data = json.loads(path.read_text())
+            if matches(data, args):
+                print(json.dumps(data))
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('action', choices=['apply', 'destroy', 'query', 'finalize'])
+    for key in ('actor', 'environment', 'module'):
+        parser.add_argument('--' + key)
+    parser.add_argument('--outcome', choices=['success', 'failure'])
+    parser.add_argument('--operation', choices=['apply', 'destroy'])
+    parser.add_argument('--start', type=date)
+    parser.add_argument('--end', type=date)
+    args = parser.parse_args(argv)
+    if args.action == 'finalize':
+        operation = args.operation or 'apply'
+        directory = report_dir()
+        if not (directory / 'audit.json').exists():
+            output = directory / ('terraform-%s-output.txt' % operation)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text('%s not reached: job setup failed or was interrupted.\n' % operation.capitalize())
+            try:
+                publish(1, directory / 'plan.tfplan' if operation == 'apply' else None, operation)
+            except Exception as exc:
+                print('AUDIT FINALIZE UPLOAD FAILED; retain/reconcile local audit.json:', exc, file=sys.stderr)
+                return 1
+        return 0
+    if args.action == 'apply':
+        return apply()
+    if args.action == 'destroy':
+        return destroy()
+    if args.start and args.end and args.start > args.end:
+        parser.error('--start must precede --end')
+    return query(args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

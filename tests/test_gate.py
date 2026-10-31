@@ -10,7 +10,7 @@ import urllib.error
 from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('gate', ROOT / 'scripts/gate.py')
+spec = importlib.util.spec_from_file_location('gate', ROOT / 'templates/compliance-gates/terraform-gate/gate.py')
 gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
 
@@ -225,20 +225,20 @@ class GateTests(unittest.TestCase):
         self.assertIn('[MASKED]', record['reason'])
 
     def test_embedded_template_matches_source(self):
-        text = (ROOT / 'templates/terraform-gate/template.yml').read_text()
+        text = (ROOT / 'templates/compliance-gates/terraform-gate/template.yml').read_text()
         embedded = text.split("<<'STR222_GATE_PY'\n", 1)[1].rsplit('      STR222_GATE_PY', 1)[0]
-        self.assertEqual(''.join(line[6:] + '\n' for line in embedded.splitlines()), (ROOT / 'scripts/gate.py').read_text())
+        self.assertEqual(''.join(line[6:] + '\n' for line in embedded.splitlines()), (ROOT / 'templates/compliance-gates/terraform-gate/gate.py').read_text())
 
     def test_template_contract(self):
-        text = (ROOT / 'templates/terraform-gate/template.yml').read_text()
+        text = (ROOT / 'templates/compliance-gates/terraform-gate/template.yml').read_text()
         header, job = text.split('\n---\n', 1)
         for name in ('job_name', 'stage', 'environment', 'min_approvals_uat', 'min_approvals_prod', 'chg_pattern', 'gate_image', 'gitlab_token'):
             self.assertIn('    {}:\n'.format(name), header)
         for needle in ("default: '(?<![A-Za-z0-9])CHG[0-9]{7}(?![A-Za-z0-9])'", "default: '$GATE_API_TOKEN'",
                        'ubi8minimal-azterraform/v1.9.2:26.04.15', "default: '1'", "default: '2'"):
             self.assertIn(needle, header)
-        for needle in ("GATE_ENV: '$[[ inputs.environment ]]'", "if: '$GATE_ENV =~ /^(sandbox|dev)$/'",
-                       "if: '$GATE_ENV =~ /^(uat|prod)$/'", 'when: manual', 'when: on_success', 'allow_failure: false',
+        for needle in ("GATE_ENV: '$[[ inputs.environment ]]'", "if: '$GATE_ENV =~ /^(sandbox|dev)$/ || $DEPLOY_ENV =~ /^(sandbox|dev)$/'",
+                       "if: '$GATE_ENV =~ /^(uat|prod)$/ || $DEPLOY_ENV =~ /^(uat|prod)$/'", 'when: manual', 'when: on_success', 'allow_failure: false',
                        'expire_in: 90 days', 'when: always', '- gate-decision.json'):
             self.assertIn(needle, job)
 

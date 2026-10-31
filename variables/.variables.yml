@@ -11,7 +11,7 @@ variables:
   # ---------------------------------------------------------------------------
   TERRAFORM_IMAGE: "registry.web.boeing.com/amp/docker-images/terraform/terraform-azure/ubi8minimal-azterraform/v1.9.2"
   TERRAFORM_IMAGE_VERSION: "26.04.15"
-  #TERRAFORM_IMAGE: "registry.web.boeing.com/ecs-catalog/docker-images/terraform-cloud-cli/v1/azure-v2" 
+  #TERRAFORM_IMAGE: "registry.web.boeing.com/ecs-catalog/docker-images/terraform-cloud-cli/v1/azure-v2"
   #TERRAFORM_IMAGE_VERSION: "1.5.0"
   TERRAFORM_DEBUG_ENABLE: "N"               # Set Y to enable TF_LOG=DEBUG
   TERRAFORM_VARIABLE_ENABLE: "N"            # Set Y to use branch-specific .tfvars
@@ -20,7 +20,7 @@ variables:
 
   TFLINT_SCAN_EXAMPLES_INCLUDE: "Y"
 
-  
+
 
   # ---------------------------------------------------------------------------
   # Azure Authentication & Backend
@@ -39,31 +39,14 @@ variables:
   AZ_TF_BACKEND_SA: ""                       # Storage account for Terraform state
 
   # ---------------------------------------------------------------------------
-  # Audit record (WORM) — STR-230
-  # Implemented by consuming the official KaaS CI/CD component
-  #   compliance-gates/audit-record@0.1.2  (kaas/pipelines/components)
-  # included from template-workflow/.iac_module_template.yml. The component writes the
-  # immutable 11-field audit record after every apply via Managed Identity (az login --identity;
-  # it rejects static ARM_CLIENT_SECRET). It CONSUMES the WORM storage account by name.
-  #
-  # AUDIT_STORAGE_ACCOUNT: the dedicated WORM account (provisioned separately via
-  # shared-services/audit, NOT by this pipeline). TEST VALUE below for STR_230 testing on the
-  # sandbox state account; set the real shared-services audit account per project before merge.
-  AUDIT_STORAGE_ACCOUNT: "kaastfssandbox00sa"  # STR_230 TEST value — replace with the shared-services audit account
-  # DEPLOY_ENV also feeds the audit-record component's `environment` input (declared with STR-222 below).
-
-  # ---------------------------------------------------------------------------
-  # STR-222 Environment-Specific Approval Gate
-  # Implemented by consuming the official KaaS CI/CD component
-  #   compliance-gates/terraform-gate@0.1.2  (kaas/pipelines/components)
-  # included from template-workflow/.iac_module_template.yml. The component handles all
-  # gate logic (sandbox/dev auto, uat >=1 approval, prod >=2 + ServiceNow CHG, fail-closed,
-  # audit trail) and takes its settings as component INPUTS (environment, chg_pattern,
-  # min_approvals_*), not CI variables. It authenticates with the built-in CI_JOB_TOKEN.
-  #
-  # DEPLOY_ENV feeds the component's `environment` input. Set per run/project
-  # (sandbox|dev|uat|prod). Left empty here; the consumer/pipeline provides it.
+  # Audit runtime and approval gate are owned by this repository.
+  # Set the separate shared-services audit account in consumer CI variables.
+  # Existing sandbox test value is retained until test scaffolding is replaced.
+  AUDIT_STORAGE_ACCOUNT: "kaastfssandbox00sa"
+  AUDIT_CONTAINER: "audit"
+  # DEPLOY_ENV is populated by workflow branch mapping.
   DEPLOY_ENV: ""
+  # GATE_API_TOKEN is a masked consumer CI variable; never commit its value.
 
   # ---------------------------------------------------------------------------
   # Gitleaks (SAD - Sensitive Authentication Data)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """STR-222 environment-specific approval gate; standard library only (Python 3.6+).
-Embedded byte-for-byte in templates/terraform-gate/template.yml (drift-tested).
+Embedded byte-for-byte in templates/compliance-gates/terraform-gate/template.yml (drift-tested).
 
 Decision (from GATE_ENV, never from the branch name):
   sandbox, dev  APPROVED without any API call
