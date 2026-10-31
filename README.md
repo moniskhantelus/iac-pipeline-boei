@@ -1,3 +1,5 @@
+> **Current branch test entry point:** The root `.gitlab-ci.yml` runs the corrected approval gate and an apply probe only. It starts through GitLab **Run pipeline**, not a push. No Terraform apply/destroy or Azure login is executed by this test configuration. See [gate test instructions](docs/GATE-TESTING.md). Existing infrastructure templates below are retained for later integration; this gate test does not validate their audit/deployment settings.
+
 # IaC module pipeline
 
 See [STR-230 implementation, deployment and acceptance notes](STR-230.md).

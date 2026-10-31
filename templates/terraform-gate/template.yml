@@ -1,0 +1,335 @@
+# =============================================================================
+# terraform-gate: environment-specific approval gate (STR-222)
+# Usable as `include: project/file` with inputs (today) and as a CI/CD component once
+# copied to templates/terraform-gate/template.yml of a components project.
+# The job body is scripts/gate.py embedded byte-for-byte (drift-tested by
+# tests/test_gate.py); edit scripts/gate.py and re-embed, never this copy alone.
+# See templates/terraform-gate/README.md for inputs, token setup and behavior.
+# =============================================================================
+spec:
+  inputs:
+    job_name:
+      default: tf-gate
+      description: 'Name of the gate job.'
+    stage:
+      default: approve
+      description: 'Stage of the gate job; must run before the apply stage.'
+    environment:
+      description: 'Target environment: sandbox | dev | uat | prod. Anything else fails closed. Typically $DEPLOY_ENV.'
+    min_approvals_uat:
+      default: '1'
+      description: 'Minimum MR approvals (author excluded) for uat.'
+    min_approvals_prod:
+      default: '2'
+      description: 'Minimum MR approvals (author excluded) for prod.'
+    chg_pattern:
+      default: '(?<![A-Za-z0-9])CHG[0-9]{7}(?![A-Za-z0-9])'
+      description: 'Regex for the change ticket required in the MR description for prod (OQ-02: confirm with the process owner).'
+    gate_image:
+      default: 'registry.web.boeing.com/amp/docker-images/terraform/terraform-azure/ubi8minimal-azterraform/v1.9.2:26.04.15'
+      description: 'Image with python3 (standard library only).'
+    gitlab_token:
+      default: '$GATE_API_TOKEN'
+      description: 'GitLab API token sent as PRIVATE-TOKEN (read_api). Empty falls back to CI_JOB_TOKEN.'
+---
+'$[[ inputs.job_name ]]':
+  stage: '$[[ inputs.stage ]]'
+  image: '$[[ inputs.gate_image ]]'
+  variables:
+    # Job-level variables are part of the variables GitLab evaluates for this job's
+    # rules:if, and references inside them (e.g. environment: $DEPLOY_ENV, a workflow:rules
+    # variable) are expanded before the expression is matched. gate.py re-validates GATE_ENV
+    # at runtime and fails closed on anything outside sandbox|dev|uat|prod.
+    GATE_ENV: '$[[ inputs.environment ]]'
+    GATE_MIN_APPROVALS_UAT: '$[[ inputs.min_approvals_uat ]]'
+    GATE_MIN_APPROVALS_PROD: '$[[ inputs.min_approvals_prod ]]'
+    GATE_CHG_PATTERN:
+      value: '$[[ inputs.chg_pattern ]]'
+      expand: false            # regex may contain '$'; never treat it as a variable reference
+    GATE_TOKEN: '$[[ inputs.gitlab_token ]]'
+  rules:
+    - if: '$GATE_ENV =~ /^(sandbox|dev)$/'
+      when: on_success
+    - if: '$GATE_ENV =~ /^(uat|prod)$/'
+      when: manual
+    - when: on_success
+  allow_failure: false
+  script:
+    - |
+      mkdir -p "${CI_PROJECT_DIR}/.terraform-gate"
+      cat > "${CI_PROJECT_DIR}/.terraform-gate/gate.py" <<'STR222_GATE_PY'
+      #!/usr/bin/env python3
+      """STR-222 environment-specific approval gate; standard library only (Python 3.6+).
+      Embedded byte-for-byte in templates/terraform-gate/template.yml (drift-tested).
+
+      Decision (from GATE_ENV, never from the branch name):
+        sandbox, dev  APPROVED without any API call
+        uat           >= GATE_MIN_APPROVALS_UAT (default 1) MR approvals for this commit
+        prod          >= GATE_MIN_APPROVALS_PROD (default 2) MR approvals for this commit AND a
+                      change ticket matching GATE_CHG_PATTERN (default bounded CHG followed by seven digits) in the
+                      MR description
+        anything else BLOCKED (fail closed)
+
+      Merge request: CI_MERGE_REQUEST_IID when present (MR pipelines), else the single open MR
+      whose source_branch is this branch and whose target differs. None or several -> BLOCKED.
+      The MR head sha must equal the pipeline commit (CI_MERGE_REQUEST_SOURCE_BRANCH_SHA for
+      merged-results pipelines, else CI_COMMIT_SHA); approvals by the MR author are not counted.
+
+      Auth: GATE_TOKEN (the gitlab_token input, normally $GATE_API_TOKEN) as PRIVATE-TOKEN; if empty,
+      CI_JOB_TOKEN as JOB-TOKEN. HTTP 401/403 -> BLOCKED with the fix to apply. Every API call logs
+      its endpoint and HTTP status; tokens are never printed or written.
+
+      Output: gate-decision.json in CI_PROJECT_DIR plus one "[AUDIT] gate_decision" log line.
+      Exit code 0 only when the outcome is APPROVED; every error path exits 1.
+      """
+      import datetime as dt
+      import json
+      import os
+      from pathlib import Path
+      import re
+      import sys
+      import urllib.error
+      import urllib.parse
+      import urllib.request
+
+      ENVIRONMENTS = ('sandbox', 'dev', 'uat', 'prod')
+      AUTO_APPROVED = ('sandbox', 'dev')
+      TIMEOUT = 10  # seconds per API call; one retry on 5xx or no response
+      TOKEN_HELP = ('set masked CI variable GATE_API_TOKEN = project/group access token with read_api '
+                    '(Settings > CI/CD > Variables, masked + protected; role Reporter or higher)')
+      DECISION_FILE = 'gate-decision.json'
+
+
+      class Blocked(Exception):
+          """The gate cannot approve; the message is the recorded reason."""
+
+
+      def setting(name, default=''):
+          """Environment value; empty or an unexpanded '$VAR' reference falls back to default."""
+          value = os.environ.get(name, '').strip()
+          if not value or re.fullmatch(r'\$\{?\w+\}?', value):
+              return default
+          return value
+
+
+      def secrets():
+          return [v for v in (setting('GATE_TOKEN'), os.environ.get('CI_JOB_TOKEN', '')) if len(v) >= 4]
+
+
+      def redact(text):
+          for secret in secrets():
+              text = text.replace(secret, '[MASKED]')
+          return text
+
+
+      def log(level, message):
+          print(redact('[{}] {}'.format(level, message)), flush=True)
+
+
+      def credentials():
+          """(header, token): GATE_TOKEN as PRIVATE-TOKEN, else CI_JOB_TOKEN as JOB-TOKEN."""
+          token = setting('GATE_TOKEN')
+          if token:
+              log('INFO', 'GitLab API auth: PRIVATE-TOKEN (gitlab_token input / GATE_API_TOKEN)')
+              return 'PRIVATE-TOKEN', token
+          job_token = os.environ.get('CI_JOB_TOKEN', '')
+          if not job_token:
+              raise Blocked('no GitLab API token available; ' + TOKEN_HELP)
+          log('WARN', 'gitlab_token input / GATE_API_TOKEN is empty; falling back to CI_JOB_TOKEN, '
+                      'which GitLab usually rejects on the merge request API')
+          return 'JOB-TOKEN', job_token
+
+
+      def api(path, auth):
+          """GET CI_API_V4_URL + path and return decoded JSON; raise Blocked on any failure."""
+          base = setting('CI_API_V4_URL').rstrip('/')
+          if not base:
+              raise Blocked('CI_API_V4_URL is not set')
+          header, token = auth
+          for attempt in (1, 2):
+              request = urllib.request.Request(base + path, headers={header: token, 'Accept': 'application/json'})
+              try:
+                  with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                      status = response.status
+                      body = response.read()
+              except urllib.error.HTTPError as error:
+                  log('INFO', 'GET {} -> HTTP {}'.format(path, error.code))
+                  if error.code in (401, 403):
+                      who = 'GATE_API_TOKEN (PRIVATE-TOKEN)' if header == 'PRIVATE-TOKEN' else 'CI_JOB_TOKEN (JOB-TOKEN)'
+                      raise Blocked('GitLab API rejected {} with HTTP {} on GET {}; {}'.format(
+                          who, error.code, path, TOKEN_HELP))
+                  if error.code >= 500 and attempt == 1:
+                      log('WARN', 'server error, retrying once')
+                      continue
+                  raise Blocked('GitLab API returned HTTP {} on GET {}'.format(error.code, path))
+              except OSError as error:  # URLError, timeouts, DNS, TLS, connection refused
+                  reason = getattr(error, 'reason', None) or error
+                  log('INFO', 'GET {} -> no response ({}: {})'.format(path, type(error).__name__, reason))
+                  if attempt == 1:
+                      log('WARN', 'no response, retrying once')
+                      continue
+                  raise Blocked('GitLab API did not respond on GET {} ({}: {})'.format(path, type(error).__name__, reason))
+              log('INFO', 'GET {} -> HTTP {}'.format(path, status))
+              try:
+                  return json.loads(body.decode('utf-8'))
+              except ValueError:
+                  raise Blocked('GitLab API returned invalid JSON on GET {}'.format(path))
+
+
+      def merge_request(auth, project):
+          """The open MR this pipeline belongs to (exactly one, or Blocked)."""
+          iid = setting('CI_MERGE_REQUEST_IID')
+          if iid:
+              mr = api('/projects/{}/merge_requests/{}'.format(project, urllib.parse.quote(iid, safe='')), auth)
+              if not isinstance(mr, dict):
+                  raise Blocked('unexpected merge request response for !{}'.format(iid))
+              if mr.get('state') != 'opened':
+                  raise Blocked('merge request !{} is {}, not opened'.format(iid, mr.get('state')))
+              return mr
+          branch = setting('CI_COMMIT_BRANCH') or setting('CI_COMMIT_REF_NAME')
+          if not branch:
+              raise Blocked('cannot determine the source branch (CI_COMMIT_BRANCH is empty)')
+          query = urllib.parse.urlencode({'state': 'opened', 'source_branch': branch, 'per_page': 100})
+          found = api('/projects/{}/merge_requests?{}'.format(project, query), auth)
+          if not isinstance(found, list):
+              raise Blocked('unexpected merge request list response')
+          mrs = [mr for mr in found if isinstance(mr, dict) and mr.get('state', 'opened') == 'opened'
+                 and mr.get('source_branch') == branch and mr.get('target_branch') != branch]
+          if not mrs:
+              raise Blocked('no open merge request from {}; open one and collect approvals'.format(branch))
+          if len(mrs) > 1:
+              listed = ', '.join('!{} -> {}'.format(mr.get('iid'), mr.get('target_branch')) for mr in mrs)
+              raise Blocked('multiple open merge requests from {} ({}); close all but one'.format(branch, listed))
+          return mrs[0]
+
+
+      def approvers(auth, project, mr):
+          """Sorted usernames that approved the MR, excluding the MR author."""
+          data = api('/projects/{}/merge_requests/{}/approvals'.format(project, mr.get('iid')), auth)
+          if not isinstance(data, dict) or not isinstance(data.get('approved_by', []), list):
+              raise Blocked('unexpected approvals response for !{}'.format(mr.get('iid')))
+          author = mr.get('author') or {}
+          names = set()
+          for entry in data.get('approved_by', []):
+              user = (entry or {}).get('user') or {}
+              if not user.get('username'):
+                  continue
+              if (author.get('id') is not None and user.get('id') == author.get('id')) or user.get('username') == author.get('username'):
+                  log('INFO', 'ignoring approval by MR author {}'.format(user['username']))
+                  continue
+              names.add(user['username'])
+          return sorted(names)
+
+
+      def minimum(name, default):
+          value = setting(name, default)
+          if not value.isdigit():
+              raise Blocked('{} must be a non-negative integer, got {!r}'.format(name, value))
+          number = int(value)
+          if number < int(default):
+              raise Blocked('{} cannot be below {}'.format(name, default))
+          return number
+
+
+      def evaluate(record):
+          """Fill record in place with the decision; raise Blocked on any failure."""
+          environment = record['environment']
+          if environment not in ENVIRONMENTS:
+              raise Blocked("environment '{}' is not one of {}".format(environment, '|'.join(ENVIRONMENTS)))
+          log('INFO', "approval gate for environment='{}' branch='{}' commit={}".format(
+              environment, record['branch'], record['commit_sha']))
+          if environment in AUTO_APPROVED:
+              record.update(outcome='APPROVED', reason='{} is auto-approved'.format(environment))
+              return
+          if environment == 'uat':
+              record['required'] = minimum('GATE_MIN_APPROVALS_UAT', '1')
+          else:
+              record['required'] = minimum('GATE_MIN_APPROVALS_PROD', '2')
+          pattern = setting('GATE_CHG_PATTERN', r'(?<![A-Za-z0-9])CHG[0-9]{7}(?![A-Za-z0-9])')
+          try:
+              ticket_re = re.compile(pattern)
+          except re.error as error:
+              raise Blocked('GATE_CHG_PATTERN is not a valid regex: {}'.format(error))
+          project = urllib.parse.quote(setting('CI_PROJECT_ID'), safe='')
+          if not project:
+              raise Blocked('CI_PROJECT_ID is not set')
+          if not record['commit_sha']:
+              raise Blocked('CI_COMMIT_SHA is not set')
+          auth = credentials()
+          mr = merge_request(auth, project)
+          record['mr_iid'] = mr.get('iid')
+          names = approvers(auth, project, mr)
+          record.update(approvers=names, approvals_count=len(names))
+          match = ticket_re.search(mr.get('description') or '')
+          record['change_ticket'] = match.group(0) if match else None
+          expected = setting('CI_MERGE_REQUEST_SOURCE_BRANCH_SHA') or record['commit_sha']
+          problems = []
+          if mr.get('sha') != expected:
+              problems.append('approvals are for a different commit (MR !{} head {}, pipeline {}); '
+                              're-run pipeline on MR head'.format(mr.get('iid'), mr.get('sha'), expected))
+          if len(names) < record['required']:
+              problems.append('{} of {} required approvals (author excluded)'.format(len(names), record['required']))
+          if environment == 'prod' and not match:
+              problems.append("no change ticket matching '{}' in MR !{} description".format(pattern, mr.get('iid')))
+          if problems:
+              raise Blocked('; '.join(problems))
+          record.update(outcome='APPROVED', reason='{} of {} required approvals on MR !{}{}'.format(
+              len(names), record['required'], mr.get('iid'),
+              ', change ticket ' + record['change_ticket'] if environment == 'prod' else ''))
+
+
+      def decide():
+          record = {
+              'environment': setting('GATE_ENV'),
+              'branch': setting('CI_COMMIT_BRANCH') or setting('CI_MERGE_REQUEST_SOURCE_BRANCH_NAME') or setting('CI_COMMIT_REF_NAME'),
+              'commit_sha': setting('CI_COMMIT_SHA'),
+              'pipeline_id': setting('CI_PIPELINE_ID'),
+              'job_id': setting('CI_JOB_ID'),
+              'mr_iid': None,
+              'approvers': [],
+              'approvals_count': 0,
+              'required': 0,
+              'change_ticket': None,
+              'outcome': 'BLOCKED',
+              'reason': '',
+              'timestamp': dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+          }
+          try:
+              evaluate(record)
+          except Blocked as error:
+              record.update(outcome='BLOCKED', reason=str(error))
+          except Exception as error:  # fail closed on anything unexpected
+              record.update(outcome='BLOCKED', reason='internal error: {}: {}'.format(type(error).__name__, error))
+          record['reason'] = redact(record['reason'])
+          return record
+
+
+      def main():
+          record = decide()
+          if record['outcome'] != 'APPROVED':
+              log('ERROR', 'BLOCKED: ' + record['reason'])
+          path = Path(os.environ.get('CI_PROJECT_DIR') or '.') / DECISION_FILE
+          written = True
+          try:
+              path.write_text(redact(json.dumps(record, indent=2, sort_keys=True)) + '\n')
+          except OSError as error:
+              written = False
+              log('ERROR', 'could not write {}: {}'.format(path, error))
+          log('AUDIT', 'gate_decision environment={} branch={} commit_sha={} mr_iid={} approvals={}/{} approvers={} '
+                       'change_ticket={} outcome={} reason={}'.format(
+                           record['environment'] or '-', record['branch'] or '-', record['commit_sha'] or '-',
+                           record['mr_iid'] if record['mr_iid'] is not None else '-', record['approvals_count'],
+                           record['required'], ','.join(record['approvers']) or '-', record['change_ticket'] or '-',
+                           record['outcome'], json.dumps(record['reason'])))
+          return 0 if written and record['outcome'] == 'APPROVED' else 1
+
+
+      if __name__ == '__main__':
+          sys.exit(main())
+      STR222_GATE_PY
+      python3 "${CI_PROJECT_DIR}/.terraform-gate/gate.py"
+  artifacts:
+    when: always
+    expire_in: 90 days
+    paths:
+      - gate-decision.json
