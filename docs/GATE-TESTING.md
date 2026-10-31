@@ -1,3 +1,27 @@
+## Fix for the consumer screenshot: audit-record@0.1.2 content not found
+
+The consumer currently includes `/template-workflow/.iac_module_template.yml`,
+which still loads the catalog audit component. Updating this repository's root
+`.gitlab-ci.yml` does not change that legacy entry point or the GitLab mirror.
+
+For the gate-only test in `azure-resource-group`:
+
+1. Open `examples/gate-test-consumer.gitlab-ci.yml` in this repository.
+2. Copy its ENTIRE contents into the consumer test branch's root `.gitlab-ci.yml`,
+   replacing the old four-line `include`. Do not append to the existing include.
+3. Save on the test branch (for example `main_STR301`), not the production default branch.
+4. Run GitLab CI Lint, then use Run pipeline on that branch with `DEPLOY_ENV=dev`.
+5. Repeat with `DEPLOY_ENV=prod` to test manual blocking, MR approvals and the change record.
+
+This standalone file has no includes, needs no library mirror update and does not
+expect scripts/tests in the consumer checkout. It embeds the same tested gate.
+There is no audit-record component and no real plan/apply/destroy in this test.
+Expected graph: `iac_init → iac_approval → iac_apply` (apply is a probe).
+The original legacy workflow is retained for later real infrastructure/audit integration;
+this test bypasses its unresolved catalog reference rather than claiming to fix that release.
+
+---
+
 # Run the approval-gate test in GitLab
 
 This kit tests the real corrected approval gate, its manual/automatic behavior, its API lookup and its decision artifact. The apply job is a probe using the same evidence guard as the legacy apply job. It never executes Terraform, Azure login or destroy. It does not test infrastructure provisioning or audit uploads.
@@ -5,7 +29,7 @@ This kit tests the real corrected approval gate, its manual/automatic behavior, 
 1. Use a separate test project, or a dedicated branch in your existing legacy consumer project. Copy this kit's files to that checkout, including the hidden `.gitlab-ci.yml`. On an existing consumer test branch, this root file REPLACES the normal workflow include for this test. Do not append the normal legacy include to it. Keep the test branch unmerged.
 2. Commit and push those files. This configuration creates pipelines only through GitLab's **Run pipeline** action (`web`), so a normal push does not run this kit. Other project-level automation or custom CI configuration settings are outside the kit; confirm the project actually uses this root `.gitlab-ci.yml`.
 3. In GitLab, run CI Lint against this branch/configuration. Then select **Build → Pipelines → Run pipeline**, select the test branch, and choose `DEPLOY_ENV=dev`.
-4. Expect `test → iac_init → iac_approval → iac_apply`. The unit test job runs 19 tests. `iac_gates_job` runs automatically, and `iac_apply_job` prints the probe PASS message after verifying its artifact.
+4. Expect `test → iac_init → iac_approval → iac_apply`. The unit test job runs 21 tests. `iac_gates_job` runs automatically, and `iac_apply_job` prints the probe PASS message after verifying its artifact.
 5. Run another pipeline with `DEPLOY_ENV=uat`. The gate must wait for a manual click and apply must wait. Click the gate: with no open MR/approvals it must fail and apply must not run.
 6. To test successful UAT/prod, open exactly one MR FROM this test branch TO a different branch in the same project. Keep it open and do not merge it. Add approvals to this MR. Do not push another commit after approvals; rerun a pipeline on the same source head. The gate compares the current branch commit to the MR head.
 7. Set masked CI variable `GATE_API_TOKEN` to an appropriate project/group access token with `read_api` and permission to read the MR approvals endpoint. If the variable is protected, use a protected test branch or the variable will not be supplied. Never commit the token. The fallback job token may lack access; 401/403 is an expected fail-closed result in that case.

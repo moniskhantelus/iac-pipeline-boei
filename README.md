@@ -1,3 +1,5 @@
+> **Consumer include error (`audit-record@0.1.2` not found):** Replace the consumer test branch’s `.gitlab-ci.yml` with the complete [standalone consumer test configuration](examples/gate-test-consumer.gitlab-ci.yml). It has no external includes. [Instructions](docs/GATE-TESTING.md).
+
 > **Current branch test entry point:** The root `.gitlab-ci.yml` runs the corrected approval gate and an apply probe only. It starts through GitLab **Run pipeline**, not a push. No Terraform apply/destroy or Azure login is executed by this test configuration. See [gate test instructions](docs/GATE-TESTING.md). Existing infrastructure templates below are retained for later integration; this gate test does not validate their audit/deployment settings.
 
 # IaC module pipeline
